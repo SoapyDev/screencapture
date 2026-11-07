@@ -22,6 +22,7 @@ mod keys;
 mod launch;
 pub mod layout;
 mod recording;
+mod remembered;
 mod tools;
 
 use std::{
@@ -50,13 +51,13 @@ use crate::{
     annotate::{self, Annotations, Color, Grab, Shape, Tool},
     capture::{MonitorInfo, Rect, Shot, Snapshot},
     job,
-    save::Config,
     selection::{Handle, Hit, Mode, Request, Selection},
     trace,
 };
 
 use folder::Folder;
 use layout::Edge;
+pub use remembered::Remembered;
 
 #[cfg(target_os = "linux")]
 pub use launch::with_recording_frame;
@@ -148,7 +149,7 @@ pub struct Overlay {
     /// Frozen image per monitor name.
     images: HashMap<String, Arc<RenderImage>>,
     phase: Phase,
-    config: Config,
+    config: Remembered,
     windows: Vec<AnyWindowHandle>,
     /// Daemon client waiting for the outcome.
     #[cfg(unix)]
@@ -172,7 +173,7 @@ pub struct Overlay {
 
 /// Open the overlay once `frozen` (started before gpui, to overlap its start-up) is ready, and
 /// run until the capture is saved or cancelled. Returns whether a file was saved.
-pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, config: Config) -> bool {
+pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, config: Remembered) -> bool {
     gpui_platform::application().run(move |cx: &mut App| {
         trace("gpui ready");
         // Overlays get closed and reopened around the folder picker; don't quit in between.
@@ -217,6 +218,14 @@ fn record_for(
     std::thread::spawn(move || outcome.answer(client));
 }
 
+/// Saves are made at once (~20 µs), so they land in the order the user made them; one that
+/// failed is reported, naming `what` changed.
+fn report_unremembered(saved: anyhow::Result<()>, what: &str) {
+    if let Err(e) = saved {
+        eprintln!("screencapture: could not remember {what}: {e:#}");
+    }
+}
+
 /// The end of a recording started from a standalone overlay: like a saved capture, print it.
 #[cfg(target_os = "linux")]
 fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) {
@@ -234,7 +243,7 @@ fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) 
 /// Work the daemon's request thread hands to the UI thread.
 #[cfg(unix)]
 enum ToUi {
-    Overlay(daemon::Pending, anyhow::Result<Frozen>, Config),
+    Overlay(daemon::Pending, anyhow::Result<Frozen>, Remembered),
     /// Show the frame for this recorded area on these screens, replacing any other; `None`
     /// removes it.
     #[cfg(target_os = "linux")]
@@ -336,7 +345,7 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                 }
                 let frozen = session.borrow_mut().take().map(Frozen::new);
                 trace("screens frozen");
-                let _ = tx.unbounded_send(ToUi::Overlay(pending, frozen, Config::load()));
+                let _ = tx.unbounded_send(ToUi::Overlay(pending, frozen, Remembered::load()));
             });
         });
         cx.spawn(async move |cx| {
@@ -359,7 +368,7 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
 }
 
 #[cfg(unix)]
-fn serve_request(pending: daemon::Pending, frozen: anyhow::Result<Frozen>, config: Config, cx: &mut App) {
+fn serve_request(pending: daemon::Pending, frozen: anyhow::Result<Frozen>, config: Remembered, cx: &mut App) {
     match frozen {
         Ok(frozen) => {
             let daemon::Request::Overlay(mode) = pending.request else {
@@ -416,7 +425,7 @@ fn warm_up(cx: &mut App) {
 fn start(
     mode: Mode,
     frozen: Frozen,
-    config: Config,
+    config: Remembered,
     #[cfg(unix)] client: Option<daemon::Pending>,
     #[cfg(not(unix))] _client: Option<()>,
     resident: bool,
@@ -663,7 +672,7 @@ impl Overlay {
         self.phase = Phase::Saving;
         let shapes: Vec<Shape> = self.annotations.shapes().cloned().collect();
         let screens = self.screens.clone();
-        let dir = self.config.output_dir(None);
+        let dir = self.config.screenshots.dir(None);
         let entity = cx.entity();
         // The pixels are already in memory: the overlay can go right away.
         cx.defer({
@@ -838,7 +847,7 @@ impl Overlay {
     }
 
     fn palette(&self) -> &[Color] {
-        self.palette.get_or_init(|| self.config.colors())
+        self.palette.get_or_init(|| self.config.palette.colors())
     }
 
     fn set_color(&mut self, color: Color, cx: &mut Context<Self>) {
@@ -868,17 +877,9 @@ impl Overlay {
     /// A colour from the picker: use it, and remember it as the custom swatch.
     fn pick_custom(&mut self, color: Color, cx: &mut Context<Self>) {
         self.picker = None;
-        self.config.custom_color = Some(annotate::to_hex(color));
-        self.remember("the colour");
+        self.config.palette.custom_color = Some(annotate::to_hex(color));
+        report_unremembered(crate::config::remember(&self.config.palette), "the colour");
         self.set_color(color, cx);
-    }
-
-    /// Save the config now (~20 µs, so saves land in the order the user made them); `what`
-    /// changed, for the error.
-    fn remember(&self, what: &str) {
-        if let Err(e) = self.config.save() {
-            eprintln!("screencapture: could not remember {what}: {e:#}");
-        }
     }
 
     fn step_width(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -942,7 +943,7 @@ impl Overlay {
         self.phase = Phase::Selecting;
         let Some(dir) = dir else { return };
         folder.choose(&mut self.config, dir);
-        self.remember("the folder");
+        report_unremembered(folder.remember(&self.config), "the folder");
     }
 
     fn pointer(&self) -> Option<annotate::Point> {
@@ -1473,7 +1474,7 @@ impl Render for View {
                     width: o.annotations.current_width(),
                     has_selection: o.annotations.selected().is_some(),
                     palette: o.palette().to_vec(),
-                    custom: o.config.custom_color(),
+                    custom: o.config.palette.custom_color(),
                     picker: o.picker,
                     text: o.annotations.sizing_text(),
                     fill: o.annotations.current_fill(),
@@ -1483,7 +1484,7 @@ impl Render for View {
             let actions = actions::ActionBar {
                 mode,
                 ready,
-                settings: o.config.record,
+                settings: o.config.recording.record,
                 videos: Folder::Videos.label(&o.config).into(),
                 notice: o.notice.as_ref(),
                 leaving,

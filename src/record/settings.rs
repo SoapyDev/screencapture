@@ -325,6 +325,35 @@ impl Overrides {
     }
 }
 
+/// The recording's section of the config: where videos go, and how they are made.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recording {
+    /// The folder last chosen; `~/Videos/Screencapture` when absent.
+    #[serde(default)]
+    pub video_dir: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub record: Settings,
+}
+
+impl crate::config::Section for Recording {}
+
+impl Recording {
+    /// Where to save: explicit choice, else remembered, else `~/Videos/Screencapture`.
+    pub fn dir(&self, explicit: Option<&std::path::Path>) -> std::path::PathBuf {
+        explicit
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| self.video_dir.clone())
+            .unwrap_or_else(default_video_dir)
+    }
+}
+
+pub fn default_video_dir() -> std::path::PathBuf {
+    dirs::video_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Videos")))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Screencapture")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +487,42 @@ mod tests {
         assert_eq!(Overrides::default().encode(), Vec::<String>::new());
         assert!(back.parse_word("fps=7").is_none());
         assert!(back.parse_word("colour=red").is_none());
+    }
+
+    fn remembered() -> Recording {
+        Recording {
+            video_dir: Some("/clips".into()),
+            ..Recording::default()
+        }
+    }
+
+    #[test]
+    fn videos_go_to_their_own_folder_by_default() {
+        assert!(default_video_dir().ends_with("Screencapture"));
+    }
+
+    #[test]
+    fn videos_go_to_the_remembered_folder() {
+        assert_eq!(remembered().dir(None), std::path::Path::new("/clips"));
+    }
+
+    #[test]
+    fn an_explicit_videos_folder_wins() {
+        let dir = remembered().dir(Some(std::path::Path::new("/now")));
+        assert_eq!(dir, std::path::Path::new("/now"));
+    }
+
+    #[test]
+    fn recording_settings_are_remembered() {
+        let mut config = crate::config::Config::default();
+        let recording = Recording {
+            record: Settings {
+                fps: Fps::F30,
+                ..Settings::default()
+            },
+            ..remembered()
+        };
+        config.set_section(&recording);
+        assert_eq!(config.section::<Recording>(), recording);
     }
 }

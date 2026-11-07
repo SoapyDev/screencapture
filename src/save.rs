@@ -2,11 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::annotate::{Color, PASTELS, parse_color};
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
+
+use crate::config::Section;
 
 /// `2026-11-06_14-35-38.123`, as in `screenshot_2026-11-06_14-35-38.123.png`: sorts
 /// chronologically, safe on every filesystem.
@@ -59,91 +60,23 @@ pub fn save_png(image: &RgbaImage, dir: &Path, time: DateTime<Local>) -> Result<
     Ok(Saved { path, png })
 }
 
-/// Settings remembered between runs.
+/// The screenshots' section of the config.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Config {
-    pub output_dir: Option<PathBuf>,
-    /// Drawing colours as `#RRGGBB` / `#RRGGBBAA`; the built-in pastels when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub palette: Option<Vec<String>>,
-    /// Last colour chosen in the picker.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_color: Option<String>,
-    /// Where recordings go; `~/Videos/Screencapture` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video_dir: Option<PathBuf>,
+pub struct Screenshots {
+    /// The folder last chosen; `~/Pictures/Screenshots` when absent.
     #[serde(default)]
-    pub record: crate::record::settings::Settings,
+    pub output_dir: Option<PathBuf>,
 }
 
-impl Config {
-    /// The drawing palette: the configured colours that parse, else the built-in pastels.
-    pub fn colors(&self) -> Vec<Color> {
-        let parsed: Vec<Color> = self
-            .palette
-            .iter()
-            .flatten()
-            .filter_map(|c| parse_color(c))
-            .collect();
-        if parsed.is_empty() {
-            PASTELS.to_vec()
-        } else {
-            parsed
-        }
-    }
+impl Section for Screenshots {}
 
-    pub fn custom_color(&self) -> Option<Color> {
-        self.custom_color.as_deref().and_then(parse_color)
-    }
-
-    pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("screencapture").join("config.json"))
-    }
-
-    /// Missing or unreadable config falls back to defaults: a broken file must not block a capture.
-    pub fn load_from(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
-    }
-
-    /// Replace the file at `path` whole: written beside it, then renamed over it, so a reader
-    /// (or a crash) never finds it half-written.
-    pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let written = beside(path);
-        std::fs::write(&written, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&written, path).inspect_err(|_| {
-            let _ = std::fs::remove_file(&written);
-        })?;
-        Ok(())
-    }
-
-    pub fn load() -> Self {
-        Self::path().map_or_default(|p| Self::load_from(&p))
-    }
-
-    pub fn save(&self) -> Result<()> {
-        Self::path().map_or(Ok(()), |p| self.save_to(&p))
-    }
-
+impl Screenshots {
     /// Where to save: explicit choice, else last used folder, else `~/Pictures/Screenshots`.
-    pub fn output_dir(&self, explicit: Option<&Path>) -> PathBuf {
+    pub fn dir(&self, explicit: Option<&Path>) -> PathBuf {
         explicit
             .map(Path::to_path_buf)
             .or_else(|| self.output_dir.clone())
             .unwrap_or_else(default_output_dir)
-    }
-
-    /// Where to save recordings: explicit choice, else remembered, else `~/Videos/Screencapture`.
-    pub fn video_dir(&self, explicit: Option<&Path>) -> PathBuf {
-        explicit
-            .map(Path::to_path_buf)
-            .or_else(|| self.video_dir.clone())
-            .unwrap_or_else(default_video_dir)
     }
 }
 
@@ -176,27 +109,11 @@ pub fn reserve(
         .expect("unbounded name search")
 }
 
-pub fn default_video_dir() -> PathBuf {
-    dirs::video_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join("Videos")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Screencapture")
-}
-
 pub fn default_output_dir() -> PathBuf {
     dirs::picture_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Screenshots")
-}
-
-/// A new file name next to `path`, for one save: saves at the same time never share one.
-fn beside(path: &Path) -> PathBuf {
-    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let save = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.{save}.tmp", std::process::id()));
-    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -273,145 +190,33 @@ mod tests {
         assert!(first.exists() && second.exists(), "reserved on disk");
     }
 
-    #[test]
-    fn videos_have_their_own_folder() {
-        let config = Config {
-            output_dir: Some("/shots".into()),
-            ..Config::default()
-        };
-        assert_eq!(config.video_dir(None), default_video_dir());
-        assert!(
-            default_video_dir().ends_with("Videos/Screencapture")
-                || default_video_dir().ends_with("Screencapture")
-        );
-        let config = Config {
-            video_dir: Some("/clips".into()),
-            ..config
-        };
-        assert_eq!(config.video_dir(None), Path::new("/clips"));
-        assert_eq!(config.video_dir(Some(Path::new("/now"))), Path::new("/now"));
-    }
-
-    #[test]
-    fn recording_settings_are_remembered() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let config = Config {
-            record: crate::record::settings::Settings {
-                fps: crate::record::settings::Fps::F30,
-                ..Default::default()
-            },
-            ..Config::default()
-        };
-        config.save_to(&path).unwrap();
-        assert_eq!(Config::load_from(&path), config);
-    }
-
-    #[test]
-    fn config_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sub/config.json");
-        let config = Config {
-            output_dir: Some("/tmp/shots".into()),
-            palette: Some(vec!["#123456".into()]),
-            custom_color: Some("#abcdef".into()),
-            ..Config::default()
-        };
-        config.save_to(&path).unwrap();
-        assert_eq!(Config::load_from(&path), config);
-    }
-
-    /// Saves of `config` to `path`, many times over, on another thread.
-    fn saving_over_and_over(config: Config, path: PathBuf) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            for _ in 0..500 {
-                config.save_to(&path).expect("the folder is writable");
-            }
-        })
-    }
-
-    #[test]
-    fn a_config_being_saved_is_never_read_half_written() {
-        let dir = tempfile::tempdir().expect("the system has a temporary folder");
-        let path = dir.path().join("config.json");
-        let config = Config {
-            output_dir: Some("/shots".into()),
-            ..Config::default()
-        };
-        config.save_to(&path).expect("the folder is writable");
-        let saving = saving_over_and_over(config.clone(), path.clone());
-        let mut broken = 0;
-        while !saving.is_finished() {
-            broken += usize::from(Config::load_from(&path) != config);
-        }
-        assert_eq!(broken, 0, "reads that found no config");
-    }
-
-    #[test]
-    fn saving_a_config_leaves_only_the_config() {
-        let dir = tempfile::tempdir().expect("the system has a temporary folder");
-        let path = dir.path().join("config.json");
-        Config::default().save_to(&path).expect("the folder is writable");
-        let files = std::fs::read_dir(dir.path()).expect("the folder exists").count();
-        assert_eq!(files, 1);
-    }
-
-    #[test]
-    fn missing_or_corrupt_config_is_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        assert_eq!(Config::load_from(&path), Config::default());
-        std::fs::write(&path, "{not json").unwrap();
-        assert_eq!(Config::load_from(&path), Config::default());
-    }
-
-    #[test]
-    fn output_dir_precedence() {
-        let remembered = Config {
+    fn remembered() -> Screenshots {
+        Screenshots {
             output_dir: Some("/remembered".into()),
-            ..Config::default()
-        };
-        assert_eq!(
-            remembered.output_dir(Some(Path::new("/explicit"))),
-            Path::new("/explicit")
-        );
-        assert_eq!(remembered.output_dir(None), Path::new("/remembered"));
-        assert_eq!(Config::default().output_dir(None), default_output_dir());
+        }
     }
 
     #[test]
-    fn palette_comes_from_config_with_pastel_fallback() {
-        assert_eq!(Config::default().colors(), PASTELS.to_vec());
-        let custom = Config {
-            palette: Some(vec!["#112233".into(), "nonsense".into(), "44556680".into()]),
-            ..Config::default()
-        };
-        assert_eq!(
-            custom.colors(),
-            vec![[0x11, 0x22, 0x33, 0xFF], [0x44, 0x55, 0x66, 0x80]]
-        );
-        let broken = Config {
-            palette: Some(vec!["nope".into()]),
-            ..Config::default()
-        };
-        assert_eq!(broken.colors(), PASTELS.to_vec());
+    fn an_explicit_folder_wins() {
+        let dir = remembered().dir(Some(Path::new("/explicit")));
+        assert_eq!(dir, Path::new("/explicit"));
     }
 
     #[test]
-    fn palette_and_custom_colour_load_from_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(
-            &path,
-            r##"{"output_dir":null,"palette":["#ff0000"],"custom_color":"#00ff00"}"##,
-        )
-        .unwrap();
-        let config = Config::load_from(&path);
-        assert_eq!(config.colors(), vec![[255, 0, 0, 255]]);
-        assert_eq!(config.custom_color(), Some([0, 255, 0, 255]));
-        // Older files without the new keys still load.
-        std::fs::write(&path, r#"{"output_dir":"/x"}"#).unwrap();
-        assert_eq!(Config::load_from(&path).output_dir, Some("/x".into()));
+    fn the_remembered_folder_comes_next() {
+        assert_eq!(remembered().dir(None), Path::new("/remembered"));
+    }
+
+    #[test]
+    fn screenshots_go_to_pictures_by_default() {
+        assert_eq!(Screenshots::default().dir(None), default_output_dir());
+    }
+
+    #[test]
+    fn the_folder_reads_from_the_config_file_s_key() {
+        let mut config = crate::config::Config::default();
+        config.set_section(&remembered());
+        assert_eq!(config.section::<Screenshots>(), remembered());
     }
 
     /// Takes nothing: like a full disk.

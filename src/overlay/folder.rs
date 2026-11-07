@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::save::Config;
+use super::remembered::Remembered;
 
 /// Which folder the user is picking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,33 +18,41 @@ impl Folder {
     }
 
     /// Where `config` saves into now.
-    pub fn current(self, config: &Config) -> PathBuf {
+    pub fn current(self, remembered: &Remembered) -> PathBuf {
         match self {
-            Self::Screenshots => config.output_dir(None),
-            Self::Videos => config.video_dir(None),
+            Self::Screenshots => remembered.screenshots.dir(None),
+            Self::Videos => remembered.recording.dir(None),
         }
     }
 
     /// Save into `dir` from now on.
-    pub fn choose(self, config: &mut Config, dir: PathBuf) {
+    pub fn choose(self, remembered: &mut Remembered, dir: PathBuf) {
         match self {
-            Self::Screenshots => config.output_dir = Some(dir),
-            Self::Videos => config.video_dir = Some(dir),
+            Self::Screenshots => remembered.screenshots.output_dir = Some(dir),
+            Self::Videos => remembered.recording.video_dir = Some(dir),
+        }
+    }
+
+    /// Write this folder's section of `remembered` to the config file.
+    pub fn remember(self, remembered: &Remembered) -> anyhow::Result<()> {
+        match self {
+            Self::Screenshots => crate::config::remember(&remembered.screenshots),
+            Self::Videos => crate::config::remember(&remembered.recording),
         }
     }
 
     /// The picker's question.
-    pub fn prompt(self, config: &Config) -> String {
+    pub fn prompt(self, remembered: &Remembered) -> String {
         let what = match self {
             Self::Screenshots => "screenshots",
             Self::Videos => "videos",
         };
-        format!("Save {what} in (now {})", self.current(config).display())
+        format!("Save {what} in (now {})", self.current(remembered).display())
     }
 
     /// The button: where it saves, and its key.
-    pub fn label(self, config: &Config) -> String {
-        let place = shortened(&self.current(config), dirs::home_dir().as_deref());
+    pub fn label(self, remembered: &Remembered) -> String {
+        let place = shortened(&self.current(remembered), dirs::home_dir().as_deref());
         match self {
             Self::Screenshots => format!("Save in {place}  O"),
             Self::Videos => format!("Videos in {place}  ⇧O"),
@@ -65,11 +73,16 @@ fn shortened(dir: &Path, home: Option<&Path>) -> String {
 mod tests {
     use super::*;
 
-    fn config() -> Config {
-        Config {
-            output_dir: Some("/shots".into()),
-            video_dir: Some("/clips".into()),
-            ..Config::default()
+    fn config() -> Remembered {
+        Remembered {
+            screenshots: crate::save::Screenshots {
+                output_dir: Some("/shots".into()),
+            },
+            recording: crate::record::settings::Recording {
+                video_dir: Some("/clips".into()),
+                ..Default::default()
+            },
+            ..Remembered::default()
         }
     }
 
@@ -92,14 +105,20 @@ mod tests {
     fn choosing_the_videos_folder_leaves_screenshots_alone() {
         let mut config = config();
         Folder::Videos.choose(&mut config, "/elsewhere".into());
-        assert_eq!(config.output_dir.as_deref(), Some(Path::new("/shots")));
+        assert_eq!(
+            config.screenshots.output_dir.as_deref(),
+            Some(Path::new("/shots"))
+        );
     }
 
     #[test]
     fn choosing_the_videos_folder_remembers_it() {
         let mut config = config();
         Folder::Videos.choose(&mut config, "/elsewhere".into());
-        assert_eq!(config.video_dir.as_deref(), Some(Path::new("/elsewhere")));
+        assert_eq!(
+            config.recording.video_dir.as_deref(),
+            Some(Path::new("/elsewhere"))
+        );
     }
 
     #[test]

@@ -167,8 +167,8 @@ impl Env for LiveEnv {
     }
 
     fn settings(&mut self) -> (Settings, PathBuf) {
-        let config = crate::save::Config::load();
-        (config.record, config.video_dir(None))
+        let recording: super::settings::Recording = crate::config::Config::load().section();
+        (recording.record, recording.dir(None))
     }
 
     fn load(&mut self) -> Option<f32> {

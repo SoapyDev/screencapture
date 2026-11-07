@@ -970,6 +970,40 @@ pub fn blend(dst: [u8; 4], src: Color, coverage: f32) -> [u8; 4] {
     ]
 }
 
+/// The drawings' section of the config: the colours offered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Palette {
+    /// Drawing colours as `#RRGGBB` / `#RRGGBBAA`; the built-in pastels when absent.
+    #[serde(default)]
+    pub palette: Option<Vec<String>>,
+    /// Last colour chosen in the picker.
+    #[serde(default)]
+    pub custom_color: Option<String>,
+}
+
+impl crate::config::Section for Palette {}
+
+impl Palette {
+    /// The configured colours that parse, else the built-in pastels.
+    pub fn colors(&self) -> Vec<Color> {
+        let parsed: Vec<Color> = self
+            .palette
+            .iter()
+            .flatten()
+            .filter_map(|c| parse_color(c))
+            .collect();
+        if parsed.is_empty() {
+            PASTELS.to_vec()
+        } else {
+            parsed
+        }
+    }
+
+    pub fn custom_color(&self) -> Option<Color> {
+        self.custom_color.as_deref().and_then(parse_color)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1742,5 +1776,38 @@ mod tests {
         assert_eq!(PASTELS.len(), 8);
         assert_eq!(PASTELS[..6].iter().filter(|c| c[3] == 0xFF).count(), 6);
         assert_eq!(&PASTELS[6..], &[[0xFF; 4], [0, 0, 0, 0xFF]]);
+    }
+
+    fn palette(colours: &[&str]) -> Palette {
+        Palette {
+            palette: Some(colours.iter().map(ToString::to_string).collect()),
+            ..Palette::default()
+        }
+    }
+
+    #[test]
+    fn no_palette_offers_the_pastels() {
+        assert_eq!(Palette::default().colors(), PASTELS.to_vec());
+    }
+
+    #[test]
+    fn the_palette_keeps_the_colours_that_parse() {
+        let colours = palette(&["#112233", "nonsense", "44556680"]).colors();
+        assert_eq!(colours, vec![[0x11, 0x22, 0x33, 0xFF], [0x44, 0x55, 0x66, 0x80]]);
+    }
+
+    #[test]
+    fn a_palette_of_nothing_that_parses_offers_the_pastels() {
+        assert_eq!(palette(&["nope"]).colors(), PASTELS.to_vec());
+    }
+
+    #[test]
+    fn the_palette_reads_from_the_config_file() {
+        let path = tempfile::tempdir().expect("the system has a temporary folder");
+        let path = path.path().join("config.json");
+        let json = r##"{"output_dir":null,"palette":["#ff0000"],"custom_color":"#00ff00"}"##;
+        std::fs::write(&path, json).expect("the folder is writable");
+        let palette: Palette = crate::config::Config::load_from(&path).section();
+        assert_eq!(palette.custom_color(), Some([0, 255, 0, 255]));
     }
 }

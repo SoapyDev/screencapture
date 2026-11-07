@@ -178,7 +178,7 @@ impl Overlay {
     /// Whether `target` can be recorded as things stand (e.g. not across screens yet).
     fn recordable(&self, target: &Target) -> Result<(), SharedString> {
         let monitors = self.selection.monitors();
-        let checked = plan::plan(target, self.config.record, monitors, None, None);
+        let checked = plan::plan(target, self.config.recording.record, monitors, None, None);
         checked.map(drop).map_err(|e| format!("{e:#}").into())
     }
 
@@ -187,7 +187,7 @@ impl Overlay {
         if !matches!(self.phase, Phase::Leaving) {
             return;
         }
-        let command = Command::Start(target, Overrides::from(self.config.record));
+        let command = Command::Start(target, Overrides::from(self.config.recording.record));
         let drawings = self.annotations.shapes().cloned().collect();
         self.phase = Phase::Done;
         super::GATE.leave(std::time::Instant::now());
@@ -206,9 +206,10 @@ impl Overlay {
         field: fn(&mut Settings) -> &mut T,
         cx: &mut Context<Self>,
     ) {
-        let value = field(&mut self.config.record);
+        let value = field(&mut self.config.recording.record);
         *value = value.next();
-        self.remember("the recording settings");
+        let saved = crate::config::remember(&self.config.recording);
+        super::report_unremembered(saved, "the recording settings");
         cx.notify();
     }
 }

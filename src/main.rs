@@ -2,6 +2,7 @@ mod annotate;
 mod capture;
 mod cli;
 mod clipboard;
+mod config;
 #[cfg(unix)]
 mod daemon;
 #[cfg(unix)]
@@ -24,7 +25,7 @@ use clap::Parser;
 
 use crate::{
     cli::{Cli, Plan},
-    save::Config,
+    overlay::Remembered,
     selection::Request,
 };
 
@@ -52,19 +53,10 @@ fn main() -> ExitCode {
     }
     let cli = Cli::parse();
     let plan = cli.plan();
-    let mut config = Config::load();
     if let Some(dir) = &cli.output {
-        // An explicit folder becomes the remembered one: for videos when recording.
-        let dir = Some(std::path::absolute(dir).unwrap_or_else(|_| dir.clone()));
-        if matches!(plan, Plan::Record(_)) {
-            config.video_dir = dir;
-        } else {
-            config.output_dir = dir;
-        }
-        if let Err(e) = config.save() {
-            eprintln!("screencapture: could not remember folder: {e:#}");
-        }
+        remember_folder(&plan, dir);
     }
+    let config = Remembered::load();
 
     let result = match plan {
         Plan::List => list(),
@@ -72,7 +64,7 @@ fn main() -> ExitCode {
         Plan::Daemon => daemon::bind(&daemon::socket_path()).map(overlay::run_daemon),
         #[cfg(not(unix))]
         Plan::Daemon => Err(anyhow::anyhow!("daemon mode needs a Unix system")),
-        Plan::Capture(request) => capture(&request, &config),
+        Plan::Capture(request) => capture(&request, &config.screenshots),
         Plan::Record(command) => return record(command),
         Plan::Overlay(mode) => return overlay_mode(mode, config),
     };
@@ -85,8 +77,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// An explicit `-o` folder becomes the remembered one: for videos when recording.
+fn remember_folder(plan: &Plan, dir: &std::path::Path) {
+    let dir = Some(std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()));
+    let config = config::Config::load();
+    let saved = if matches!(plan, Plan::Record(_)) {
+        let mut recording: record::settings::Recording = config.section();
+        recording.video_dir = dir;
+        config::remember(&recording)
+    } else {
+        let mut screenshots: save::Screenshots = config.section();
+        screenshots.output_dir = dir;
+        config::remember(&screenshots)
+    };
+    if let Err(e) = saved {
+        eprintln!("screencapture: could not remember folder: {e:#}");
+    }
+}
+
 /// Hand the request to a running daemon (instant), or run the overlay in this process.
-fn overlay_mode(mode: selection::Mode, config: Config) -> ExitCode {
+fn overlay_mode(mode: selection::Mode, config: Remembered) -> ExitCode {
     #[cfg(unix)]
     if let Some(reply) = daemon::request(&daemon::socket_path(), mode) {
         trace("daemon replied");
@@ -212,8 +222,8 @@ fn report_record(answer: anyhow::Result<daemon::Answer>) -> ExitCode {
 }
 
 /// No-UI path: nothing but capture and encode.
-fn capture(request: &Request, config: &Config) -> anyhow::Result<()> {
-    let saved = job::run(request, &config.output_dir(None))?;
+fn capture(request: &Request, screenshots: &save::Screenshots) -> anyhow::Result<()> {
+    let saved = job::run(request, &screenshots.dir(None))?;
     trace("saved");
     clipboard::copy_png(saved.png);
     println!("{}", saved.path.display());
