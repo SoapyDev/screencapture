@@ -8,7 +8,7 @@ use gpui::{
     prelude::*, px, rgba,
 };
 
-use super::{Overlay, Phase, layout::Edge, tools};
+use super::{Overlay, Phase, folder::Folder, layout::Edge, tools};
 use crate::{
     record::{
         command::Command,
@@ -33,6 +33,8 @@ pub struct ActionBar<'a> {
     /// Picked screens, or 1 for a region; 0 when there is nothing to capture yet.
     pub ready: usize,
     pub settings: Settings,
+    /// Where videos are saved, as the folder button shows it.
+    pub videos: SharedString,
     pub notice: Option<&'a SharedString>,
     pub leaving: bool,
 }
@@ -49,7 +51,12 @@ pub fn action_bar(overlay: &Entity<Overlay>, bar: &ActionBar<'_>) -> AnyElement 
                 .on_click(tools::on(overlay, Overlay::confirm)),
         )
         .child(super::separator())
-        .children(setting_buttons(overlay, bar.settings));
+        .children(setting_buttons(overlay, bar.settings))
+        .child(super::separator())
+        .child(
+            tools::button("videos", bar.videos.clone(), false)
+                .on_click(tools::on(overlay, |o, cx| o.browse(Folder::Videos, cx))),
+        );
     let column = div()
         .flex()
         .flex_col()

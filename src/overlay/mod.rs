@@ -14,6 +14,7 @@ mod actions;
 mod controls;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod drawer;
+mod folder;
 #[cfg(unix)]
 mod gate;
 mod keys;
@@ -54,6 +55,7 @@ use crate::{
     trace,
 };
 
+use folder::Folder;
 use layout::Edge;
 
 #[cfg(target_os = "linux")]
@@ -880,35 +882,24 @@ impl Overlay {
         cx.notify();
     }
 
-    fn browse(&mut self, cx: &mut Context<Self>) {
+    /// Let the user pick `folder` in a file dialog (the overlay steps aside meanwhile).
+    fn browse(&mut self, folder: Folder, cx: &mut Context<Self>) {
         self.phase = Phase::Browsing;
         let entity = cx.entity();
-        let start = self.config.output_dir(None);
+        let prompt = folder.prompt(&self.config);
         cx.defer(move |cx| {
             close_windows(&entity, cx);
             let picked = cx.prompt_for_paths(PathPromptOptions {
                 files: false,
                 directories: true,
                 multiple: false,
-                prompt: Some(format!("Save screenshots in (now {})", start.display()).into()),
+                prompt: Some(prompt.into()),
             });
             cx.spawn(async move |cx| {
-                let choice = picked
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten()
-                    .and_then(|p| p.into_iter().next());
+                let choice = picked.await.ok().and_then(Result::ok).flatten();
+                let dir = choice.and_then(|paths| paths.into_iter().next());
                 cx.update(|cx| {
-                    entity.update(cx, |o, _| {
-                        if let Some(dir) = choice {
-                            o.config.output_dir = Some(dir);
-                            if let Err(e) = o.config.save() {
-                                eprintln!("could not remember folder: {e:#}");
-                            }
-                        }
-                        o.phase = Phase::Selecting;
-                    });
+                    entity.update(cx, |o, _| o.browsed(folder, dir));
                     open_windows(&entity, cx);
                 });
             })
@@ -916,16 +907,14 @@ impl Overlay {
         });
     }
 
-    fn output_label(&self) -> SharedString {
-        let dir: PathBuf = self.config.output_dir(None);
-        let text = dirs::home_dir()
-            .and_then(|home| {
-                dir.strip_prefix(&home)
-                    .ok()
-                    .map(|rest| format!("~/{}", rest.display()))
-            })
-            .unwrap_or_else(|| dir.display().to_string());
-        text.into()
+    /// Back from the folder picker: remember `dir` if one was picked.
+    fn browsed(&mut self, folder: Folder, dir: Option<PathBuf>) {
+        self.phase = Phase::Selecting;
+        let Some(dir) = dir else { return };
+        folder.choose(&mut self.config, dir);
+        if let Err(e) = self.config.save() {
+            eprintln!("could not remember folder: {e:#}");
+        }
     }
 
     fn pointer(&self) -> Option<annotate::Point> {
@@ -1039,7 +1028,7 @@ impl View {
                 "a" => o.select_all(cx),
                 "r" => o.set_mode(Mode::Region, cx),
                 "s" => o.set_mode(Mode::Screens, cx),
-                "o" => o.browse(cx),
+                "o" => o.browse(Folder::for_key(shift), cx),
                 "v" => o.record(shift, cx),
                 "c" => o.cycle_color(cx),
                 "p" => o.toggle_picker(cx),
@@ -1099,7 +1088,7 @@ impl View {
         });
     }
 
-    fn toolbar(&self, bar: &Bar, cx: &Context<Self>) -> impl IntoElement {
+    fn toolbar(&self, bar: &Bar) -> impl IntoElement {
         let overlay = self.overlay.clone();
         let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| {
             let overlay = overlay.clone();
@@ -1117,8 +1106,8 @@ impl View {
             .child(tools::button("all", "All screens  A", bar.all).on_click(act(Overlay::select_all)))
             .child(separator())
             .child(
-                tools::button("folder", format!("Save in {}  O", bar.output), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.overlay.update(cx, Overlay::browse))),
+                tools::button("folder", bar.output.clone(), false)
+                    .on_click(act(|o, cx| o.browse(Folder::Screenshots, cx))),
             )
             .child(tools::button("close", "✕", false).on_click(act(Overlay::cancel)));
 
@@ -1450,7 +1439,7 @@ impl Render for View {
             let bar = Bar {
                 mode,
                 leaving,
-                output: o.output_label(),
+                output: Folder::Screenshots.label(&o.config).into(),
                 edge: layout::toolbar_edge(monitor, region),
                 all: o.selection.is_all(),
                 tools: o.tools_ready,
@@ -1471,11 +1460,12 @@ impl Render for View {
                 mode,
                 ready,
                 settings: o.config.record,
+                videos: Folder::Videos.label(&o.config).into(),
                 notice: o.notice.as_ref(),
                 leaving,
             };
             layer = layer
-                .child(self.toolbar(&bar, cx))
+                .child(self.toolbar(&bar))
                 .child(actions::action_bar(&self.overlay, &actions));
         }
 
