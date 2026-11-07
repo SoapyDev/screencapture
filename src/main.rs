@@ -17,7 +17,6 @@ use screencapture_recording as record;
 
 use crate::{
     cli::{Cli, Plan},
-    overlay::Remembered,
     selection::Request,
 };
 
@@ -31,7 +30,6 @@ fn main() -> ExitCode {
     if let Some(dir) = &cli.output {
         remember_folder(&plan, dir);
     }
-    let config = Remembered::load();
 
     let result = match plan {
         Plan::List => list(),
@@ -39,9 +37,9 @@ fn main() -> ExitCode {
         Plan::Daemon => daemon::bind(&daemon::socket_path()).map(overlay::run_daemon),
         #[cfg(not(unix))]
         Plan::Daemon => Err(anyhow::anyhow!("daemon mode needs a Unix system")),
-        Plan::Capture(request) => capture(&request, &config.screenshots),
+        Plan::Capture(request) => capture(&request, &config::Config::load().section()),
         Plan::Record(command) => return record(command),
-        Plan::Overlay(mode) => return overlay_mode(mode, config),
+        Plan::Overlay(mode) => return overlay_mode(mode),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -71,7 +69,7 @@ fn remember_folder(plan: &Plan, dir: &std::path::Path) {
 }
 
 /// Hand the request to a running daemon (instant), or run the overlay in this process.
-fn overlay_mode(mode: selection::Mode, config: Remembered) -> ExitCode {
+fn overlay_mode(mode: selection::Mode) -> ExitCode {
     #[cfg(unix)]
     if let Some(reply) = daemon::request(&daemon::socket_path(), mode) {
         trace("daemon replied");
@@ -105,7 +103,7 @@ fn overlay_mode(mode: selection::Mode, config: Remembered) -> ExitCode {
     }
     // Freeze the screens now, overlapping gpui start-up.
     let frozen = std::thread::spawn(overlay::freeze);
-    if overlay::run(mode, frozen, config) {
+    if overlay::run(mode, frozen) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

@@ -8,7 +8,11 @@ use gpui::{
     Stateful, StrokeOptions, Window, div, hsla, point, prelude::*, px, rgba, size,
 };
 
-use super::{ACCENT, Overlay};
+use super::{
+    ACCENT, Overlay,
+    editing::Editing,
+    feature::{Act, Effect},
+};
 use crate::annotate::{self, Color, Shape, Target, Tool};
 
 /// Everything a rendered text box depends on.
@@ -88,6 +92,17 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, activ
         .child(label.into())
 }
 
+/// Click handler changing the drawing tools with `change`.
+fn edit(
+    act: &Act,
+    change: impl Fn(&mut Editing) + 'static,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+    act.on(move |editing: &mut Editing, _| {
+        change(editing);
+        Effect::Repaint
+    })
+}
+
 /// Click handler running `f` on the overlay.
 pub(super) fn on(
     overlay: &Entity<Overlay>,
@@ -120,7 +135,7 @@ fn swatch(id: String, c: Color, selected: bool) -> Stateful<Div> {
         })
 }
 
-pub fn drawing_row(overlay: &Entity<Overlay>, bar: &DrawBar) -> Div {
+pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
     let mut row = super::panel();
     for (i, tool) in Tool::ALL.into_iter().enumerate() {
         let glyph = match tool {
@@ -139,34 +154,32 @@ pub fn drawing_row(overlay: &Entity<Overlay>, bar: &DrawBar) -> Div {
                 format!("{glyph} {}", i + 1),
                 bar.tool == Some(tool),
             )
-            .on_click(on(overlay, move |o, cx| o.toggle_tool(tool, cx))),
+            .on_click(edit(act, move |e| e.toggle_tool(tool))),
         );
     }
     row = row.child(super::separator());
     for (i, &c) in bar.palette.iter().enumerate() {
         row = row.child(
-            swatch(format!("color-{i}"), c, c == bar.color)
-                .on_click(on(overlay, move |o, cx| o.set_color(c, cx))),
+            swatch(format!("color-{i}"), c, c == bar.color).on_click(edit(act, move |e| e.set_color(c))),
         );
     }
     if let Some(c) = bar.custom.filter(|c| !bar.palette.contains(c)) {
         row = row.child(
-            swatch("color-custom".into(), c, c == bar.color)
-                .on_click(on(overlay, move |o, cx| o.set_color(c, cx))),
+            swatch("color-custom".into(), c, c == bar.color).on_click(edit(act, move |e| e.set_color(c))),
         );
     }
     row = row
-        .child(button("picker", "＋", bar.picker.is_some()).on_click(on(overlay, Overlay::toggle_picker)))
+        .child(button("picker", "＋", bar.picker.is_some()).on_click(edit(act, Editing::toggle_picker)))
         .when(bar.text, |row| {
             // Which colour the palette sets, and whether the box has a background.
             row.child(super::separator())
                 .child(
                     button("ink", "A text", bar.target == Target::Ink)
-                        .on_click(on(overlay, |o, cx| o.set_target(Target::Ink, cx))),
+                        .on_click(edit(act, |e| e.set_target(Target::Ink))),
                 )
                 .child(
                     button("fill-target", "▇ fill", bar.target == Target::Fill)
-                        .on_click(on(overlay, |o, cx| o.set_target(Target::Fill, cx))),
+                        .on_click(edit(act, |e| e.set_target(Target::Fill))),
                 )
                 .child(
                     button(
@@ -174,12 +187,12 @@ pub fn drawing_row(overlay: &Entity<Overlay>, bar: &DrawBar) -> Div {
                         if bar.fill.is_some() { "Fill on" } else { "Fill off" },
                         bar.fill.is_some(),
                     )
-                    .on_click(on(overlay, Overlay::toggle_fill)),
+                    .on_click(edit(act, Editing::toggle_fill)),
                 )
         })
         .child(super::separator())
         // Width (font size for text) stepper; the mouse wheel does the same.
-        .child(button("thinner", "−", false).on_click(on(overlay, |o, cx| o.step_width(-1., cx))))
+        .child(button("thinner", "−", false).on_click(edit(act, |e| e.step_width(-1.))))
         .child(
             div()
                 .w(px(44.))
@@ -187,17 +200,17 @@ pub fn drawing_row(overlay: &Entity<Overlay>, bar: &DrawBar) -> Div {
                 .justify_center()
                 .child(format!("{} px", bar.width)),
         )
-        .child(button("thicker", "+", false).on_click(on(overlay, |o, cx| o.step_width(1., cx))))
+        .child(button("thicker", "+", false).on_click(edit(act, |e| e.step_width(1.))))
         .child(super::separator())
-        .child(button("undo", "↶", false).on_click(on(overlay, Overlay::undo)));
+        .child(button("undo", "↶", false).on_click(edit(act, Editing::undo)));
     if bar.has_selection {
-        row = row.child(button("delete", "🗑 Del", false).on_click(on(overlay, Overlay::delete_selected)));
+        row = row.child(button("delete", "🗑 Del", false).on_click(edit(act, Editing::delete_selected)));
     }
     row
 }
 
 /// Hue strip and a saturation × brightness grid for that hue.
-pub fn picker(overlay: &Entity<Overlay>, hue: f32, current: Color) -> Div {
+pub fn picker(act: &Act, hue: f32, current: Color) -> Div {
     const HUES: usize = 36;
     const SATURATIONS: [f32; 10] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.];
     const VALUES: [f32; 6] = [1., 0.9, 0.78, 0.65, 0.5, 0.35];
@@ -213,7 +226,7 @@ pub fn picker(overlay: &Entity<Overlay>, hue: f32, current: Color) -> Div {
                 .cursor(CursorStyle::PointingHand)
                 .bg(color(annotate::hsv(h, 1., 1.)))
                 .when(chosen, |d| d.border_1().border_color(gpui::white()))
-                .on_click(on(overlay, move |o, cx| o.set_picker_hue(h, cx))),
+                .on_click(edit(act, move |e| e.set_picker_hue(h))),
         );
     }
     let mut grid = div().flex().flex_col();
@@ -229,7 +242,7 @@ pub fn picker(overlay: &Entity<Overlay>, hue: f32, current: Color) -> Div {
                     .cursor(CursorStyle::PointingHand)
                     .bg(color(pick))
                     .when(pick == current, |d| d.border_2().border_color(gpui::white()))
-                    .on_click(on(overlay, move |o, cx| o.pick_custom(pick, cx))),
+                    .on_click(edit(act, move |e| e.pick_custom(pick))),
             );
         }
         grid = grid.child(line);

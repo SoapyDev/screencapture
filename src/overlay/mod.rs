@@ -10,11 +10,14 @@
 //! the daemon it is the only work done before the windows open.
 
 mod actions;
+mod capturing;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod controls;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod drawer;
 mod drawn;
+mod editing;
+pub mod feature;
 mod folder;
 #[cfg(unix)]
 mod gate;
@@ -23,11 +26,12 @@ mod keys;
 mod launch;
 pub mod layout;
 mod recording;
-mod remembered;
+#[cfg(target_os = "linux")]
+mod recordings;
 mod tools;
 
 use std::{
-    cell::OnceCell,
+    any::Any,
     collections::HashMap,
     path::PathBuf,
     rc::Rc,
@@ -38,27 +42,26 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Entity, FocusHandle, FontWeight,
-    Hsla, ImageSource, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, Pixels, PlatformDisplay, Point, QuitMode, RenderImage, ScrollDelta, ScrollEvent,
-    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div,
-    hsla, img, prelude::*, px, rgba, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Entity, FocusHandle,
+    FontWeight, Hsla, ImageSource, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, PlatformDisplay, Point, QuitMode, RenderImage,
+    ScrollDelta, ScrollEvent, SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
+    WindowOptions, canvas, div, hsla, img, prelude::*, px, rgba, size,
 };
 use smallvec::SmallVec;
 
 #[cfg(unix)]
 use crate::daemon;
 use crate::{
-    annotate::{self, Annotations, Color, Grab, Shape, Tool},
     capture::{MonitorInfo, Rect, Shot, Snapshot},
-    job,
+    config::Config,
+    drawings::Shared,
     selection::{Handle, Hit, Mode, Request, Selection},
     trace,
 };
 
-use folder::Folder;
+use feature::{Act, Ctx, Effect, Feature, HandOver, Picked, SaveJob, Start};
 use layout::Edge;
-pub use remembered::Remembered;
 
 #[cfg(target_os = "linux")]
 pub use launch::with_recording_frame;
@@ -144,26 +147,20 @@ pub fn freeze() -> anyhow::Result<Frozen> {
 
 pub struct Overlay {
     selection: Selection,
-    annotations: Annotations,
     /// The frozen screens, in layout order.
     screens: Arc<[(MonitorInfo, Arc<RenderImage>)]>,
     /// Frozen image per monitor name.
     images: HashMap<String, Arc<RenderImage>>,
     phase: Phase,
-    config: Remembered,
     windows: Vec<AnyWindowHandle>,
     /// Daemon client waiting for the outcome.
     #[cfg(unix)]
     client: Option<daemon::Client>,
     /// Keep the process (and its warm GPU context) alive afterwards.
     resident: bool,
-    /// Drawing colours, parsed from the config the first time the drawing row shows.
-    palette: OnceCell<Vec<Color>>,
-    /// Hue of the colour picker while it is open.
-    picker: Option<f32>,
-    /// Touchpad scrolling not yet turned into a width step.
-    scroll: f32,
-    /// The drawing toolbar row joins one frame after the overlay first shows: building it
+    /// What the features add, in the order they are asked.
+    features: Vec<Box<dyn Feature>>,
+    /// The features' toolbar rows join one frame after the overlay first shows: building them
     /// (symbol glyphs, ~30 elements) would otherwise make that first frame miss a vblank.
     tools_ready: bool,
     /// Per overlay, for `SCREENCAPTURE_TRACE`.
@@ -172,15 +169,27 @@ pub struct Overlay {
     notice: Option<SharedString>,
 }
 
+/// The features built into this program, with their remembered settings, in the order they are
+/// asked (and their actions shown).
+pub fn features() -> Vec<Box<dyn Feature>> {
+    let config = Config::load();
+    vec![
+        Box::new(editing::Editing::new(config.section())),
+        #[cfg(target_os = "linux")]
+        Box::new(recordings::Recordings::new(config.section())),
+        Box::new(capturing::Capturing::new(config.section())),
+    ]
+}
+
 /// Open the overlay once `frozen` (started before gpui, to overlap its start-up) is ready, and
 /// run until the capture is saved or cancelled. Returns whether a file was saved.
-pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, config: Remembered) -> bool {
+pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>) -> bool {
     gpui_platform::application().run(move |cx: &mut App| {
         trace("gpui ready");
         // Overlays get closed and reopened around the folder picker; don't quit in between.
         cx.set_quit_mode(QuitMode::Explicit);
         match frozen.join().expect("capture thread panicked") {
-            Ok(frozen) => start(mode, frozen, config, None, false, cx),
+            Ok(frozen) => start(mode, frozen, None, false, cx),
             Err(e) => {
                 eprintln!("screencapture: {e:#}");
                 cx.quit();
@@ -243,7 +252,7 @@ fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) 
 /// Work the daemon's request thread hands to the UI thread.
 #[cfg(unix)]
 enum ToUi {
-    Overlay(daemon::Client, Mode, anyhow::Result<Frozen>, Remembered),
+    Overlay(daemon::Client, Mode, anyhow::Result<Frozen>),
     /// Show the frame for this recorded area on these screens, replacing any other; `None`
     /// removes it.
     #[cfg(target_os = "linux")]
@@ -353,7 +362,7 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                     }
                     let frozen = session.borrow_mut().take().map(Frozen::new);
                     trace("screens frozen");
-                    let _ = tx.unbounded_send(ToUi::Overlay(client, mode, frozen, Remembered::load()));
+                    let _ = tx.unbounded_send(ToUi::Overlay(client, mode, frozen));
                 },
             );
         });
@@ -361,8 +370,8 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
             let mut shown: Option<recording::Shown> = None;
             while let Some(work) = rx.next().await {
                 match work {
-                    ToUi::Overlay(client, mode, frozen, config) => {
-                        cx.update(|cx| serve_request(client, mode, frozen, config, cx));
+                    ToUi::Overlay(client, mode, frozen) => {
+                        cx.update(|cx| serve_request(client, mode, frozen, cx));
                     }
                     #[cfg(target_os = "linux")]
                     ToUi::Frame(frame) => cx.update(|cx| {
@@ -377,15 +386,9 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
 }
 
 #[cfg(unix)]
-fn serve_request(
-    client: daemon::Client,
-    mode: Mode,
-    frozen: anyhow::Result<Frozen>,
-    config: Remembered,
-    cx: &mut App,
-) {
+fn serve_request(client: daemon::Client, mode: Mode, frozen: anyhow::Result<Frozen>, cx: &mut App) {
     match frozen {
-        Ok(frozen) => start(mode, frozen, config, Some(client), true, cx),
+        Ok(frozen) => start(mode, frozen, Some(client), true, cx),
         Err(e) => {
             GATE.abort();
             client.reply(&daemon::Reply::Error(format!("{e:#}")));
@@ -435,98 +438,81 @@ fn warm_up(cx: &mut App) {
 fn start(
     mode: Mode,
     frozen: Frozen,
-    config: Remembered,
     #[cfg(unix)] client: Option<daemon::Client>,
     #[cfg(not(unix))] _client: Option<()>,
     resident: bool,
     cx: &mut App,
 ) {
     let screens: Arc<[_]> = frozen.screens.into();
-    let monitors: Vec<MonitorInfo> = screens.iter().map(|(m, _)| m.clone()).collect();
     let images = screens
         .iter()
         .map(|(m, image)| (m.name.clone(), image.clone()))
         .collect();
-    let mut selection = Selection::new(mode, monitors);
-    #[cfg(unix)]
-    if let Some((x, y)) = crate::hyprland::cursor() {
-        selection.motion(x, y);
-    }
+    let selection = selection_at_pointer(mode, &screens);
     let overlay = cx.new(|cx: &mut Context<Overlay>| {
         // However the overlay goes away (the compositor may close every window, e.g. on an
         // output change), the client gets an answer and the daemon takes new requests.
         cx.on_release(Overlay::released).detach();
         Overlay {
             selection,
-            annotations: Annotations::default(),
             screens,
             images,
             phase: Phase::Selecting,
-            config,
             windows: Vec::new(),
             #[cfg(unix)]
             client,
             resident,
-            palette: OnceCell::new(),
-            picker: None,
-            scroll: 0.,
+            features: features(),
             tools_ready: false,
             traced: std::cell::Cell::new(false),
             notice: None,
         }
     });
     open_windows(&overlay, cx);
-
-    // Test hook (debug builds): select a region by itself once the overlay is up, optionally
-    // drawing a red line across its middle.
     #[cfg(debug_assertions)]
-    if let Some(rect) = std::env::var("SCREENCAPTURE_E2E_SELECT")
+    run_test_hooks(&overlay, cx);
+}
+
+/// A selection over `screens`, told where the pointer already is.
+fn selection_at_pointer(mode: Mode, screens: &[(MonitorInfo, Arc<RenderImage>)]) -> Selection {
+    let monitors: Vec<MonitorInfo> = screens.iter().map(|(m, _)| m.clone()).collect();
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only Hyprland says where the pointer is")
+    )]
+    let mut selection = Selection::new(mode, monitors);
+    #[cfg(unix)]
+    if let Some((x, y)) = crate::hyprland::cursor() {
+        selection.motion(x, y);
+    }
+    selection
+}
+
+/// Test hook (debug builds): with `SCREENCAPTURE_E2E_SELECT`, once the overlay is up, let every
+/// feature act on that region (draw, record, save) as the end-to-end tests ask.
+#[cfg(debug_assertions)]
+fn run_test_hooks(overlay: &Entity<Overlay>, cx: &App) {
+    let Some(region) = std::env::var("SCREENCAPTURE_E2E_SELECT")
         .ok()
         .and_then(|g| Rect::parse(&g).ok())
-    {
-        let line = std::env::var_os("SCREENCAPTURE_E2E_LINE").is_some();
-        // Redact the left quarter, write "Hi" on a filled box in the top-right quarter.
-        let extras = std::env::var_os("SCREENCAPTURE_E2E_EXTRAS").is_some();
-        // Record the region instead of capturing it.
-        let record = std::env::var_os("SCREENCAPTURE_E2E_RECORD").is_some();
-        // Then click Capture at once, while the bars slide away.
-        let capture_too = std::env::var_os("SCREENCAPTURE_E2E_CAPTURE_TOO").is_some();
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(500))
-                .await;
-            let () = overlay.update(cx, |o, cx| {
-                if line {
-                    let y = rect.y as f32 + rect.h as f32 / 2.;
-                    o.annotations.tool = Some(Tool::Line);
-                    o.annotations.press((rect.x as f32, y));
-                    o.annotations.release((rect.right() as f32, y));
+    else {
+        return;
+    };
+    let overlay = overlay.clone();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(500))
+            .await;
+        overlay.update(cx, |o, cx| {
+            for index in 0..o.features.len() {
+                if let Some(effect) = o.features[index].test_hook(region) {
+                    o.apply(index, effect, cx);
                 }
-                if extras {
-                    let (x, y, w, h) = (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32);
-                    let a = &mut o.annotations;
-                    a.tool = Some(Tool::Redact);
-                    a.press((x, y));
-                    a.release((x + w / 4., y + h));
-                    a.tool = Some(Tool::Text);
-                    a.fill_on = true;
-                    a.press((x + w / 2., y));
-                    a.release((x + w, y + h / 2.));
-                    a.type_text("Hi");
-                    a.stop_editing();
-                }
-                if record {
-                    o.record_target(crate::record::plan::Target::Region(rect), cx);
-                    if capture_too {
-                        o.finish(Some(Request::Region(rect)), cx);
-                    }
-                } else {
-                    o.finish(Some(Request::Region(rect)), cx);
-                }
-            });
-        })
-        .detach();
-    }
+            }
+            cx.notify();
+        });
+    })
+    .detach();
 }
 
 fn open_windows(overlay: &Entity<Overlay>, cx: &mut App) {
@@ -662,15 +648,61 @@ impl Overlay {
         matches!(self.phase, Phase::Selecting | Phase::Leaving)
     }
 
-    fn finish(&mut self, request: Option<Request>, cx: &mut Context<Self>) {
+    /// Run `act` on feature `index` (an `F`) and apply its effect, while selecting.
+    fn act_on<F: Feature>(
+        &mut self,
+        index: usize,
+        act: &impl Fn(&mut F, &Ctx) -> Effect,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selecting() {
+            return;
+        }
+        let ctx = Ctx {
+            selection: &self.selection,
+        };
+        let feature: &mut dyn Any = &mut *self.features[index];
+        let Some(feature) = feature.downcast_mut::<F>() else {
+            return;
+        };
+        let effect = act(feature, &ctx);
+        self.apply(index, effect, cx);
+    }
+
+    /// Do what feature `index` asked.
+    fn apply(&mut self, index: usize, effect: Effect, cx: &mut Context<Self>) {
+        match effect {
+            Effect::Repaint => cx.notify(),
+            Effect::Save(request, job) => self.save(request, job, cx),
+            Effect::HandOver(start) => self.hand_over(start, cx),
+            Effect::Browse { prompt, picked } => self.browse(index, prompt, picked, cx),
+            Effect::Notice(text) => {
+                self.notice = Some(text);
+                cx.notify();
+            }
+        }
+    }
+
+    /// What was drawn over the screens, if a feature draws.
+    fn drawings(&self) -> Option<Shared> {
+        self.features.iter().find_map(|feature| feature.drawings())
+    }
+
+    /// Dragging the selection, or something of a feature's.
+    fn busy(&self) -> bool {
+        self.selection.is_dragging() || self.features.iter().any(|feature| feature.busy())
+    }
+
+    fn holds_a_tool(&self) -> bool {
+        self.features.iter().any(|feature| feature.holds_a_tool())
+    }
+
+    /// Close the overlay and save what `job` makes of `request`, off the UI thread.
+    fn save(&mut self, request: Request, job: SaveJob, cx: &mut Context<Self>) {
         // E.g. Capture clicked while the bars slide away for a recording.
         if !self.selecting() {
             return;
         }
-        let Some(request) = request else {
-            cx.notify();
-            return;
-        };
         // A request that can't produce an image would lose the selection and drawings: keep
         // the overlay up instead.
         if let Err(e) = borrowed(&self.screens).and_then(|snapshot| snapshot.placements(&request)) {
@@ -680,56 +712,65 @@ impl Overlay {
         }
         trace("selection done");
         self.phase = Phase::Saving;
-        let drawings = drawn::Drawn::of(self.annotations.shapes());
-        let screens = self.screens.clone();
-        let dir = self.config.screenshots.dir(None);
-        let entity = cx.entity();
+        let (drawings, screens) = (self.drawings(), self.screens.clone());
         // The pixels are already in memory: the overlay can go right away.
-        cx.defer({
-            let entity = entity.clone();
-            move |cx| close_windows(&entity, cx)
-        });
+        Self::close(cx);
         // A strong handle: once the windows are gone, nothing else keeps the overlay alive.
+        let entity = cx.entity();
         cx.spawn(async move |_, cx| {
-            let saved = cx
-                .background_spawn(async move {
-                    let image = job::compose(&borrowed(&screens)?, &request, drawings.as_deref())?;
-                    trace("composed");
-                    let saved = crate::save::save_png(&image, &dir, chrono::Local::now())?;
-                    trace("saved");
-                    crate::clipboard::copy_png(saved.png);
-                    trace("copied");
-                    Ok(saved.path)
-                })
-                .await;
+            let made = async move { job(&borrowed(&screens)?, &request, drawings.as_deref()) };
+            let saved = cx.background_spawn(made).await;
             trace("reported");
-            let () = entity.update(cx, |o, cx| o.end(&saved.map(Some), cx));
+            entity.update(cx, |o, cx| o.end(&saved.map(Some), cx));
         })
         .detach();
+    }
+
+    /// Remove the windows once this update is over.
+    fn close(cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        cx.defer(move |cx| close_windows(&entity, cx));
+    }
+
+    /// Slide the bars away, then close the overlay and let `start` take over.
+    fn hand_over(&mut self, start: Start, cx: &mut Context<Self>) {
+        if !self.selecting() {
+            return;
+        }
+        self.phase = Phase::Leaving;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(actions::SLIDE).await;
+            let _ = this.update(cx, |o, cx| o.take_over(start, cx));
+        })
+        .detach();
+    }
+
+    fn take_over(&mut self, start: Start, cx: &mut Context<Self>) {
+        // Something else ended the overlay while the bars slid away.
+        if !matches!(self.phase, Phase::Leaving) {
+            return;
+        }
+        let hand = HandOver {
+            #[cfg(unix)]
+            client: self.client.take(),
+            resident: self.resident,
+            drawings: self.drawings(),
+        };
+        self.phase = Phase::Done;
+        #[cfg(unix)]
+        GATE.leave(std::time::Instant::now());
+        Self::close(cx);
+        start(hand, cx);
     }
 
     /// Report the outcome (`Ok(None)` = cancelled), close the overlay, and quit unless resident.
     fn end(&mut self, outcome: &anyhow::Result<Option<PathBuf>>, cx: &mut Context<Self>) {
         #[cfg(unix)]
         if let Some(client) = self.client.take() {
-            client.reply(&match outcome {
-                Ok(Some(path)) => daemon::Reply::Saved(path.clone()),
-                Ok(None) => daemon::Reply::Cancelled,
-                Err(e) => daemon::Reply::Error(format!("{e:#}")),
-            });
+            client.reply(&reply_for(outcome));
         }
-        if !self.resident {
-            match outcome {
-                Ok(Some(path)) => {
-                    SAVED.store(true, Ordering::Relaxed);
-                    println!("{}", path.display());
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!("screencapture: {e:#}"),
-            }
-        } else if let Err(e) = outcome {
-            eprintln!("screencapture: {e:#}");
-        }
+        self.report(outcome);
         self.phase = Phase::Done;
         // The client has its answer and may ask again at once: that request waits until the
         // windows removed just below are off the screens (see `gate::SETTLE`), not refused.
@@ -743,6 +784,18 @@ impl Overlay {
                 cx.quit();
             }
         });
+    }
+
+    /// Standalone, the saved path goes to stdout; errors always go to stderr.
+    fn report(&self, outcome: &anyhow::Result<Option<PathBuf>>) {
+        match outcome {
+            Ok(Some(path)) if !self.resident => {
+                SAVED.store(true, Ordering::Relaxed);
+                println!("{}", path.display());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("screencapture: {e:#}"),
+        }
     }
 
     /// The overlay is gone. If that happened without [`Self::end`] (all windows closed under us),
@@ -773,233 +826,229 @@ impl Overlay {
         }
     }
 
-    /// Esc: close the picker, else drop the shape selection, else give up.
+    /// Esc: a feature closes something of its own first, else give up.
     fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.picker.take().is_some() || self.annotations.deselect() {
+        if self.features.iter_mut().any(|feature| feature.escape()) {
             cx.notify();
         } else {
             self.cancel(cx);
         }
     }
 
-    fn confirm(&mut self, cx: &mut Context<Self>) {
-        let request = self.selection.confirm();
-        self.finish(request, cx);
-    }
-
-    /// A new kind of capture starts with no tool in hand.
-    fn put_tool_down(&mut self) {
-        self.annotations.stop_editing();
-        self.annotations.tool = None;
-    }
-
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.put_tool_down();
+        self.mode_changed();
         self.selection.select_all();
         cx.notify();
     }
 
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        self.notice = None;
-        self.put_tool_down();
+        self.mode_changed();
         self.selection.set_mode(mode);
         cx.notify();
     }
 
-    /// Pick a drawing tool, or put it down if it is already in hand.
-    fn toggle_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
-        self.annotations.stop_editing();
-        self.annotations.tool = (self.annotations.tool != Some(tool)).then_some(tool);
-        if self.annotations.tool == Some(Tool::Text) {
-            crate::text::preload();
-        }
-        cx.notify();
-    }
-
-    fn toggle_fill(&mut self, cx: &mut Context<Self>) {
-        self.annotations.toggle_fill();
-        cx.notify();
-    }
-
-    fn set_target(&mut self, target: annotate::Target, cx: &mut Context<Self>) {
-        self.annotations.target = target;
-        cx.notify();
-    }
-
-    /// Keys while typing in a text box. Returns whether the key was used (always, while
-    /// typing: shortcuts must not fire mid-sentence).
-    fn text_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
-        use keys::TextEdit;
-        if self.annotations.editing().is_none() {
-            return false;
-        }
-        let m = &keystroke.modifiers;
-        let mods = keys::Mods {
-            control: m.control,
-            alt: m.alt,
-            platform: m.platform,
-        };
-        let a = &mut self.annotations;
-        match keys::text_edit(&keystroke.key, keystroke.key_char.as_deref(), mods) {
-            TextEdit::Done => a.stop_editing(),
-            TextEdit::Newline => a.type_text("\n"),
-            TextEdit::Backspace => a.backspace(),
-            TextEdit::DeleteWord => a.delete_word(),
-            TextEdit::Undo => {
-                a.stop_editing();
-                a.undo();
-            }
-            TextEdit::Type(text) => a.type_text(&text),
-            TextEdit::Swallow => return true,
-        }
-        cx.notify();
-        true
-    }
-
-    fn palette(&self) -> &[Color] {
-        self.palette.get_or_init(|| self.config.palette.colors())
-    }
-
-    fn set_color(&mut self, color: Color, cx: &mut Context<Self>) {
-        self.annotations.set_color(color);
-        cx.notify();
-    }
-
-    fn cycle_color(&mut self, cx: &mut Context<Self>) {
-        let palette = self.palette().to_vec();
-        let i = palette
-            .iter()
-            .position(|c| *c == self.annotations.current_color());
-        let next = palette[i.map_or(0, |i| (i + 1) % palette.len())];
-        self.set_color(next, cx);
-    }
-
-    fn toggle_picker(&mut self, cx: &mut Context<Self>) {
-        self.picker = if self.picker.is_some() { None } else { Some(0.) };
-        cx.notify();
-    }
-
-    fn set_picker_hue(&mut self, hue: f32, cx: &mut Context<Self>) {
-        self.picker = Some(hue);
-        cx.notify();
-    }
-
-    /// A colour from the picker: use it, and remember it as the custom swatch.
-    fn pick_custom(&mut self, color: Color, cx: &mut Context<Self>) {
-        self.picker = None;
-        self.config.palette.custom_color = Some(annotate::to_hex(color));
-        report_unremembered(crate::config::remember(&self.config.palette), "the colour");
-        self.set_color(color, cx);
-    }
-
-    fn step_width(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.annotations.step_width(delta);
-        cx.notify();
-    }
-
-    /// Mouse wheel: resize the selected shape, or the width of the tool in hand.
-    fn scroll(&mut self, lines: f32, cx: &mut Context<Self>) {
-        if self.annotations.selected().is_none() && self.annotations.tool.is_none() {
-            return;
-        }
-        self.scroll += lines;
-        let steps = self.scroll.trunc();
-        if steps != 0. {
-            self.scroll -= steps;
-            self.step_width(steps, cx);
+    fn mode_changed(&mut self) {
+        self.notice = None;
+        for feature in &mut self.features {
+            feature.mode_changed();
         }
     }
 
-    fn undo(&mut self, cx: &mut Context<Self>) {
-        self.annotations.undo();
-        cx.notify();
-    }
-
-    fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        self.annotations.delete_selected();
-        cx.notify();
-    }
-
-    /// Let the user pick `folder` in a file dialog (the overlay steps aside meanwhile).
-    fn browse(&mut self, folder: Folder, cx: &mut Context<Self>) {
+    /// Step aside for a folder picker asking `prompt`; feature `index` gets the folder picked.
+    fn browse(&mut self, index: usize, prompt: String, picked: Picked, cx: &mut Context<Self>) {
         if !self.selecting() {
             return;
         }
         self.phase = Phase::Browsing;
         let entity = cx.entity();
-        let prompt = folder.prompt(&self.config);
         cx.defer(move |cx| {
             close_windows(&entity, cx);
-            let picked = cx.prompt_for_paths(PathPromptOptions {
-                files: false,
-                directories: true,
-                multiple: false,
-                prompt: Some(prompt.into()),
-            });
-            cx.spawn(async move |cx| {
-                let choice = picked.await.ok().and_then(Result::ok).flatten();
-                let dir = choice.and_then(|paths| paths.into_iter().next());
-                cx.update(|cx| {
-                    entity.update(cx, |o, _| o.browsed(folder, dir));
-                    open_windows(&entity, cx);
-                });
-            })
-            .detach();
+            ask_for_folder(
+                entity,
+                prompt,
+                Box::new(move |o, dir| o.browsed(index, dir, picked)),
+                cx,
+            );
         });
     }
 
-    /// Back from the folder picker: remember `dir` if one was picked.
-    fn browsed(&mut self, folder: Folder, dir: Option<PathBuf>) {
+    /// Back from the folder picker: hand `dir` to feature `index`, if one was picked.
+    fn browsed(&mut self, index: usize, dir: Option<PathBuf>, picked: Picked) {
         self.phase = Phase::Selecting;
         let Some(dir) = dir else { return };
-        folder.choose(&mut self.config, dir);
-        report_unremembered(folder.remember(&self.config), "the folder");
+        let feature: &mut dyn Any = &mut *self.features[index];
+        picked(feature, dir);
     }
 
-    fn pointer(&self) -> Option<annotate::Point> {
-        self.selection.pointer().map(|(x, y)| (x as f32, y as f32))
+    /// A key while selecting: the features first (a text box takes every key), then the
+    /// overlay's own.
+    fn key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        if !self.selecting() {
+            return;
+        }
+        if let Some((index, effect)) = self.feature_key(keystroke) {
+            self.apply(index, effect, cx);
+            return;
+        }
+        self.own_key(keystroke, cx);
     }
 
-    /// Everything that can change how the pointer looks or what is highlighted.
-    fn pointer_state(&self) -> (Option<String>, Option<Rect>, Option<Hit>, Option<Grab>) {
+    fn feature_key(&mut self, keystroke: &Keystroke) -> Option<(usize, Effect)> {
+        let ctx = Ctx {
+            selection: &self.selection,
+        };
+        let mut features = self.features.iter_mut().enumerate();
+        features.find_map(|(index, feature)| Some((index, feature.key(keystroke, &ctx)?)))
+    }
+
+    fn own_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        match keystroke.key.as_str() {
+            "escape" => self.escape(cx),
+            "a" => self.select_all(cx),
+            "r" => self.set_mode(Mode::Region, cx),
+            "s" => self.set_mode(Mode::Screens, cx),
+            key => {
+                let Some((dx, dy)) = arrow(key) else { return };
+                if keystroke.modifiers.shift {
+                    self.selection.resize_by(dx, dy);
+                } else {
+                    self.selection.nudge(dx, dy);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// A left press: a feature's first (a shape, a tool in hand), else the selection's.
+    fn press(&mut self, point: feature::Point, clicks: usize, cx: &mut Context<Self>) {
+        if !self.selecting() {
+            return;
+        }
+        if !self
+            .features
+            .iter_mut()
+            .any(|feature| feature.press(point, clicks))
+        {
+            let (x, y) = rounded(point);
+            self.selection.press(x, y);
+        }
+        cx.notify();
+    }
+
+    /// The pointer moved: repaint only when something visible changed.
+    fn motion(&mut self, point: feature::Point, cx: &mut Context<Self>) {
+        if !self.selecting() {
+            return;
+        }
+        let before = self.selection_state();
+        let changed = self
+            .features
+            .iter_mut()
+            .fold(false, |changed, feature| feature.motion(point) | changed);
+        let (x, y) = rounded(point);
+        self.selection.motion(x, y);
+        if changed || before != self.selection_state() {
+            cx.notify();
+        }
+    }
+
+    fn release(&mut self, point: feature::Point, cx: &mut Context<Self>) {
+        if !self.selecting() {
+            return;
+        }
+        if !self.features.iter_mut().any(|feature| feature.release(point)) {
+            let (x, y) = rounded(point);
+            self.selection.release(x, y);
+        }
+        cx.notify();
+    }
+
+    fn scroll(&mut self, lines: f32, cx: &mut Context<Self>) {
+        if self.selecting() && self.features.iter_mut().any(|feature| feature.scroll(lines)) {
+            cx.notify();
+        }
+    }
+
+    /// Everything of the selection that changes how the pointer looks or what is highlighted.
+    fn selection_state(&self) -> (Option<String>, Option<Rect>, Option<Hit>) {
+        let selection = &self.selection;
         (
-            self.selection.hovered().map(|m| m.name.clone()),
-            self.selection.region(),
-            self.selection.pointer().map(|(x, y)| self.selection.hit(x, y)),
-            self.pointer().and_then(|p| self.annotations.grab_at(p)),
+            selection.hovered().map(|m| m.name.clone()),
+            selection.region(),
+            selection.pointer().map(|(x, y)| selection.hit(x, y)),
         )
     }
 
     fn cursor(&self) -> CursorStyle {
-        let busy = self.annotations.is_busy();
-        match self.pointer().and_then(|p| self.annotations.grab_at(p)) {
-            Some(Grab::Handle(_)) => return CursorStyle::Crosshair,
-            Some(Grab::Shape(_)) if busy => return CursorStyle::ClosedHand,
-            Some(Grab::Shape(_)) => return CursorStyle::OpenHand,
-            None if busy || self.annotations.tool.is_some() => return CursorStyle::Crosshair,
-            None => {}
+        let pointer = self.selection.pointer();
+        let point = pointer.map(|(x, y)| (x as f32, y as f32));
+        let decided = point.and_then(|point| self.features.iter().find_map(|f| f.cursor(point)));
+        if let Some(style) = decided {
+            return style;
         }
-        match (self.selection.mode, self.selection.pointer()) {
+        match (self.selection.mode, pointer) {
             (Mode::Region, Some((x, y))) => {
                 cursor_for(self.selection.hit(x, y), self.selection.is_dragging())
             }
             _ => CursorStyle::Crosshair,
         }
     }
+
+    /// Click handlers for feature `index`.
+    fn act(overlay: &Entity<Self>, index: usize) -> Act {
+        Act {
+            overlay: overlay.clone(),
+            index,
+        }
+    }
 }
 
-/// What the main toolbar row shows, read from the overlay before building it.
-struct Bar {
-    mode: Mode,
-    /// Sliding away: a recording is starting.
-    leaving: bool,
-    output: SharedString,
-    edge: Edge,
-    /// Every screen picked: "All screens" is the active choice.
-    all: bool,
-    draw: tools::DrawBar,
-    /// Show the drawing row (from the second frame on).
-    tools: bool,
+/// The overlay's part once a folder was picked (or not).
+type Reopened = Box<dyn FnOnce(&mut Overlay, Option<PathBuf>)>;
+
+/// Ask for a folder asking `prompt`; then `picked` gets it on the overlay, which reopens.
+fn ask_for_folder(entity: Entity<Overlay>, prompt: String, picked: Reopened, cx: &App) {
+    let asked = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some(prompt.into()),
+    });
+    cx.spawn(async move |cx| {
+        let choice = asked.await.ok().and_then(Result::ok).flatten();
+        let dir = choice.and_then(|paths| paths.into_iter().next());
+        cx.update(|cx| {
+            entity.update(cx, |o, _| picked(o, dir));
+            open_windows(&entity, cx);
+        });
+    })
+    .detach();
+}
+
+/// The daemon's answer for an overlay's outcome.
+#[cfg(unix)]
+fn reply_for(outcome: &anyhow::Result<Option<PathBuf>>) -> daemon::Reply {
+    match outcome {
+        Ok(Some(path)) => daemon::Reply::Saved(path.clone()),
+        Ok(None) => daemon::Reply::Cancelled,
+        Err(e) => daemon::Reply::Error(format!("{e:#}")),
+    }
+}
+
+/// An arrow key, as a one-pixel step.
+fn arrow(key: &str) -> Option<(i32, i32)> {
+    match key {
+        "left" => Some((-1, 0)),
+        "right" => Some((1, 0)),
+        "up" => Some((0, -1)),
+        "down" => Some((0, 1)),
+        _ => None,
+    }
+}
+
+/// A desktop point to whole pixels, as the selection counts.
+const fn rounded((x, y): feature::Point) -> (i32, i32) {
+    (x.round() as i32, y.round() as i32)
 }
 
 /// One monitor's overlay window.
@@ -1008,8 +1057,6 @@ struct View {
     monitor: MonitorInfo,
     image: Option<Arc<RenderImage>>,
     focus: FocusHandle,
-    /// Text boxes rendered for this window, by what they show.
-    texts: HashMap<tools::TextKey, Arc<RenderImage>>,
 }
 
 /// Dark rounded strip the toolbar rows are made of.
@@ -1048,70 +1095,17 @@ impl View {
             monitor,
             image,
             focus,
-            texts: HashMap::new(),
         }
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let keystroke = &event.keystroke;
-        let (shift, control) = (keystroke.modifiers.shift, keystroke.modifiers.control);
-        self.overlay.update(cx, |o, cx| {
-            if !o.selecting() || o.text_key(keystroke, cx) {
-                return;
-            }
-            match keystroke.key.as_str() {
-                "escape" => o.escape(cx),
-                "enter" => o.confirm(cx),
-                "z" if control => o.undo(cx),
-                "delete" | "backspace" => o.delete_selected(cx),
-                "a" => o.select_all(cx),
-                "r" => o.set_mode(Mode::Region, cx),
-                "s" => o.set_mode(Mode::Screens, cx),
-                "o" => o.browse(Folder::for_key(shift), cx),
-                "v" => o.record(shift, cx),
-                "c" => o.cycle_color(cx),
-                "p" => o.toggle_picker(cx),
-                "[" | "-" => o.step_width(-1., cx),
-                "]" | "=" | "+" => o.step_width(1., cx),
-                key @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8") => {
-                    let i = key.parse::<usize>().map_or(0, |n| n - 1);
-                    o.toggle_tool(Tool::ALL[i], cx);
-                }
-                key @ ("left" | "right" | "up" | "down") => {
-                    let (dx, dy) = match key {
-                        "left" => (-1, 0),
-                        "right" => (1, 0),
-                        "up" => (0, -1),
-                        _ => (0, 1),
-                    };
-                    if shift {
-                        o.selection.resize_by(dx, dy);
-                    } else {
-                        o.selection.nudge(dx, dy);
-                    }
-                    cx.notify();
-                }
-                _ => {}
-            }
-        });
+        self.overlay.update(cx, |o, cx| o.key(&event.keystroke, cx));
     }
 
     fn on_press(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let p = to_global(self.monitor.rect, event.position);
-        self.overlay.update(cx, |o, cx| {
-            if !o.selecting() {
-                return;
-            }
-            o.picker = None;
-            // Shapes and the tool in hand first; otherwise the press is for the selection.
-            if !o.annotations.press(p) {
-                o.selection.press(p.0.round() as i32, p.1.round() as i32);
-            } else if event.click_count >= 2 {
-                // Double-click a text box to type in it again.
-                o.annotations.start_editing();
-            }
-            cx.notify();
-        });
+        let point = to_global(self.monitor.rect, event.position);
+        self.overlay
+            .update(cx, |o, cx| o.press(point, event.click_count, cx));
     }
 
     fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1120,69 +1114,38 @@ impl View {
             // Touchpads: one step per ~24 px.
             ScrollDelta::Pixels(p) => f32::from(p.y) / 24.,
         };
-        self.overlay.update(cx, |o, cx| {
-            if o.selecting() {
-                o.scroll(lines, cx);
+        self.overlay.update(cx, |o, cx| o.scroll(lines, cx));
+    }
+
+    /// Until the features' rows show: add them right after this frame (and trace the first).
+    fn join_rows_after_this_frame(&self, o: &Overlay, window: &Window) {
+        let first = !o.traced.replace(true);
+        if first {
+            trace("first overlay frame built");
+        }
+        let overlay = self.overlay.clone();
+        window.on_next_frame(move |_, cx| {
+            if first {
+                trace("first overlay frame presented");
             }
+            overlay.update(cx, |o, cx| {
+                o.tools_ready = true;
+                cx.notify();
+            });
         });
     }
 
-    fn toolbar(&self, bar: &Bar) -> impl IntoElement {
-        let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| tools::on(&self.overlay, f);
-        let main = panel()
-            .child(
-                tools::button("region", "Region  R", bar.mode == Mode::Region)
-                    .on_click(act(|o, cx| o.set_mode(Mode::Region, cx))),
+    /// The window taking keys, scrolls and presses.
+    fn listening(&self, root: gpui::Stateful<Div>, o: &Overlay, cx: &Context<Self>) -> gpui::Stateful<Div> {
+        root.cursor(o.cursor())
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
+            .on_scroll(cx.listener(Self::on_scroll))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_press))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| this.overlay.update(cx, Overlay::cancel)),
             )
-            .child(
-                tools::button("screens", "Screens  S", bar.mode == Mode::Screens && !bar.all)
-                    .on_click(act(|o, cx| o.set_mode(Mode::Screens, cx))),
-            )
-            .child(tools::button("all", "All screens  A", bar.all).on_click(act(Overlay::select_all)))
-            .child(separator())
-            .child(
-                tools::button("folder", bar.output.clone(), false)
-                    .on_click(act(|o, cx| o.browse(Folder::Screenshots, cx))),
-            )
-            .child(tools::button("close", "✕", false).on_click(act(Overlay::cancel)));
-
-        let mut column = div().flex().flex_col().items_center().gap_1();
-        let rows = [
-            Some(main.into_any_element()),
-            bar.tools
-                .then(|| tools::drawing_row(&self.overlay, &bar.draw).into_any_element()),
-        ];
-        let rows = rows.into_iter().flatten();
-        // Rows grow away from the screen edge.
-        match bar.edge {
-            Edge::Top => column = column.children(rows),
-            Edge::Bottom => column = column.children(rows.rev()),
-        }
-        if let Some(hue) = bar.draw.picker.filter(|_| bar.tools) {
-            let picker = tools::picker(&self.overlay, hue, bar.draw.color);
-            column = match bar.edge {
-                Edge::Top => column.child(picker),
-                Edge::Bottom => div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .child(picker)
-                    .child(column),
-            };
-        }
-        let place = div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .flex()
-            .justify_center()
-            .child(column);
-        let offset = match bar.edge {
-            Edge::Top => actions::EDGE_GAP,
-            Edge::Bottom => actions::EDGE_GAP + actions::ACTION_BAR_ROOM,
-        };
-        actions::slide(place, bar.edge, offset, bar.leaving, "toolbar")
     }
 }
 
@@ -1218,11 +1181,20 @@ fn handle_div(x: i32, y: i32) -> Div {
 }
 
 /// Window-local position to global logical desktop coordinates.
-fn to_global(monitor: Rect, p: Point<Pixels>) -> annotate::Point {
+fn to_global(monitor: Rect, p: Point<Pixels>) -> feature::Point {
     (
         monitor.x as f32 + f32::from(p.x),
         monitor.y as f32 + f32::from(p.y),
     )
+}
+
+/// `rect` relative to `monitor`'s top-left.
+const fn local(rect: Rect, monitor: Rect) -> Rect {
+    Rect {
+        x: rect.x - monitor.x,
+        y: rect.y - monitor.y,
+        ..rect
+    }
 }
 
 const fn cursor_for(hit: Hit, dragging: bool) -> CursorStyle {
@@ -1241,319 +1213,237 @@ impl Render for View {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let o = self.overlay.read(cx);
         if !o.tools_ready {
-            let first = !o.traced.replace(true);
-            if first {
-                trace("first overlay frame built");
-            }
-            let overlay = self.overlay.clone();
-            window.on_next_frame(move |_, cx| {
-                if first {
-                    trace("first overlay frame presented");
-                }
-                overlay.update(cx, |o, cx| {
-                    if !o.tools_ready {
-                        o.tools_ready = true;
-                        cx.notify();
-                    }
-                });
-            });
+            self.join_rows_after_this_frame(o, window);
         }
-        let mut root = div().id("overlay").size_full().relative().bg(gpui::black());
-        if let Some(image) = &self.image {
-            root = root.child(
-                img(ImageSource::Render(image.clone()))
-                    .absolute()
-                    .size_full()
-                    .object_fit(ObjectFit::Fill),
-            );
-        }
+        let root = frozen_screen(self.image.as_ref());
         if !o.shows_selection() {
             return root;
         }
-
-        let monitor = self.monitor.rect;
-        let local = |r: Rect| Rect::new(r.x - monitor.x, r.y - monitor.y, r.w, r.h);
-        let region = o.selection.region();
-        let hovered = o.selection.hovered().map(|m| m.name == self.monitor.name);
-        let mode = o.selection.mode;
-        let busy = o.selection.is_dragging() || o.annotations.is_busy();
-
-        let mut layer = root
-            .cursor(o.cursor())
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::on_key))
-            .on_scroll(cx.listener(Self::on_scroll))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_press))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _, _, cx| this.overlay.update(cx, Overlay::cancel)),
-            );
-
-        // Drawings sit on the frozen image, under the dimming, like the screen content, one
-        // element per shape so they stack as in the saved image.
-        let scale = window.scale_factor();
-        let mut texts = HashMap::new();
-        let origin = (monitor.x, monitor.y);
-        let box_rect = |s: &Shape| {
-            let (l, t, r, b) = s.bounds();
-            Rect::new(
-                l.round() as i32,
-                t.round() as i32,
-                (r - l).round() as i32,
-                (b - t).round() as i32,
-            )
-        };
-        for shape in o.annotations.shapes() {
-            if shape.tool != Tool::Text {
-                let shape = shape.clone();
-                layer = layer.child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, (), window, _| {
-                            tools::paint_shapes(std::slice::from_ref(&shape), origin, bounds, window);
-                        },
-                    )
-                    .absolute()
-                    .size_full(),
-                );
-                continue;
-            }
-            let rect = box_rect(shape);
-            if rect.intersect(monitor).is_none() {
-                continue;
-            }
-            let key = tools::TextKey::new(shape, scale);
-            let image = self
-                .texts
-                .remove(&key)
-                .unwrap_or_else(|| texts.get(&key).cloned().unwrap_or_else(|| key.render()));
-            texts.insert(key, image.clone());
-            layer = layer.child(
-                img(ImageSource::Render(image))
-                    .absolute()
-                    .left(px((rect.x - monitor.x) as f32))
-                    .top(px((rect.y - monitor.y) as f32))
-                    .w(px(rect.w as f32))
-                    .h(px(rect.h as f32))
-                    .object_fit(ObjectFit::Fill),
-            );
-        }
-        // Boxes no longer shown: free their textures.
-        for (_, stale) in std::mem::replace(&mut self.texts, texts) {
-            let _ = window.drop_image(stale);
-        }
-        // The box being typed in: outline and caret.
-        if let Some(shape) = o.annotations.editing() {
-            let l = local(box_rect(shape));
-            let (x, y, h) = crate::text::caret(&shape.text, shape.width, l.w.max(1) as u32);
-            layer = layer.child(rect_div(l).border_1().border_color(ACCENT)).child(
-                div()
-                    .absolute()
-                    .left(px(l.x as f32 + x))
-                    .top(px(l.y as f32 + y))
-                    .w(px(2.))
-                    .h(px(h))
-                    .bg(tools::color(shape.color)),
-            );
-        }
-
-        // Dim everything but the selection.
-        let clear = match mode {
-            Mode::Region => region,
-            Mode::Screens => o.selection.is_picked(&self.monitor.name).then_some(monitor),
-        };
-        for r in layout::dim_rects(monitor, clear) {
-            layer = layer.child(rect_div(r).bg(DIM));
-        }
-
-        match mode {
-            Mode::Region => {
-                if let Some(sel) = region.filter(|r| r.intersect(monitor).is_some()) {
-                    let l = local(sel);
-                    layer = layer.child(rect_div(l).border_1().border_color(ACCENT));
-                    if !busy && o.annotations.tool.is_none() {
-                        let (mx, my) = (l.x + l.w / 2, l.y + l.h / 2);
-                        for (hx, hy) in [
-                            (l.x, l.y),
-                            (mx, l.y),
-                            (l.right(), l.y),
-                            (l.right(), my),
-                            (l.right(), l.bottom()),
-                            (mx, l.bottom()),
-                            (l.x, l.bottom()),
-                            (l.x, my),
-                        ] {
-                            layer = layer.child(handle_div(hx, hy));
-                        }
-                    }
-                    let label_y = if l.bottom() + 28 < monitor.h {
-                        l.bottom() + 8
-                    } else {
-                        (l.y - 30).max(0)
-                    };
-                    layer = layer.child(
-                        div()
-                            .absolute()
-                            .left(px(l.x.max(0) as f32))
-                            .top(px(label_y as f32))
-                            .px_2()
-                            .rounded_sm()
-                            .bg(rgba(0x000000c0))
-                            .text_xs()
-                            .text_color(gpui::white())
-                            .child(format!("{} × {}", sel.w, sel.h)),
-                    );
-                } else if region.is_none() && hovered == Some(true) {
-                    layer = layer.child(
-                        rect_div(local(monitor))
-                            .border_2()
-                            .border_color(hsla(0.58, 0.85, 0.55, 0.5)),
-                    );
-                }
-            }
-            Mode::Screens => {
-                let picked = o.selection.is_picked(&self.monitor.name);
-                let border = if picked {
-                    ACCENT
-                } else if hovered == Some(true) {
-                    hsla(0., 0., 1., 0.5)
-                } else {
-                    hsla(0., 0., 0., 0.)
-                };
-                layer = layer.child(
-                    rect_div(local(monitor))
-                        .border_4()
-                        .border_color(border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .px_4()
-                                .py_2()
-                                .rounded_lg()
-                                .bg(rgba(0x000000a0))
-                                .text_2xl()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(gpui::white())
-                                .child(format!("{}{}", if picked { "✓ " } else { "" }, self.monitor.name)),
-                        ),
-                );
-            }
-        }
-
-        // The selected shape's handles (a ring around a counter).
-        if let Some(shape) = o.annotations.selected().filter(|_| !busy) {
-            let to_local =
-                |(x, y): annotate::Point| (x.round() as i32 - monitor.x, y.round() as i32 - monitor.y);
-            if shape.tool == Tool::Counter {
-                let (cx_, cy_) = to_local(shape.points[0]);
-                let r = shape.radius().round() as i32 + 4;
-                layer = layer.child(
-                    rect_div(Rect::new(cx_ - r, cy_ - r, 2 * r, 2 * r))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(ACCENT),
-                );
-            }
-            for h in shape.handles() {
-                let (hx, hy) = to_local(h);
-                layer = layer.child(handle_div(hx, hy));
-            }
-        }
-
-        // Toolbar on the monitor under the pointer (all of them until the pointer is seen),
-        // hidden while dragging so it never gets in the way.
-        if !busy && hovered != Some(false) {
-            let ready = match o.selection.confirm() {
-                Some(Request::Screens(n)) => n.len(),
-                Some(Request::Region(_)) => 1,
-                None => 0,
-            };
-            let leaving = matches!(o.phase, Phase::Leaving);
-            let bar = Bar {
-                mode,
-                leaving,
-                output: Folder::Screenshots.label(&o.config).into(),
-                edge: layout::toolbar_edge(monitor, region),
-                all: o.selection.is_all(),
-                tools: o.tools_ready,
-                draw: tools::DrawBar {
-                    tool: o.annotations.tool,
-                    color: o.annotations.current_color(),
-                    width: o.annotations.current_width(),
-                    has_selection: o.annotations.selected().is_some(),
-                    palette: o.palette().to_vec(),
-                    custom: o.config.palette.custom_color(),
-                    picker: o.picker,
-                    text: o.annotations.sizing_text(),
-                    fill: o.annotations.current_fill(),
-                    target: o.annotations.target,
-                },
-            };
-            let actions = actions::ActionBar {
-                mode,
-                ready,
-                settings: o.config.recording.record,
-                videos: Folder::Videos.label(&o.config).into(),
-                notice: o.notice.as_ref(),
-                leaving,
-            };
-            layer = layer
-                .child(self.toolbar(&bar))
-                .child(actions::action_bar(&self.overlay, &actions));
-        }
-
-        // Window-wide listeners: during a drag the compositor keeps sending pointer events to
-        // the surface where it started, even past its edge, so selections can span monitors.
-        let overlay = self.overlay.clone();
-        layer.child(
-            canvas(
-                |_, _, _| (),
-                move |_, (), window, _| {
-                    let moving = overlay.clone();
-                    window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
-                        if phase != DispatchPhase::Bubble {
-                            return;
-                        }
-                        let p = to_global(monitor, e.position);
-                        moving.update(cx, |o, cx| {
-                            if !o.selecting() {
-                                return;
-                            }
-                            let before = o.pointer_state();
-                            if o.annotations.is_busy() {
-                                o.annotations.motion(p);
-                                cx.notify();
-                            }
-                            o.selection.motion(p.0.round() as i32, p.1.round() as i32);
-                            // Repaint only when something visible changed.
-                            if before != o.pointer_state() {
-                                cx.notify();
-                            }
-                        });
-                    });
-                    window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
-                        if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
-                            return;
-                        }
-                        let p = to_global(monitor, e.position);
-                        overlay.update(cx, |o, cx| {
-                            if !o.selecting() {
-                                return;
-                            }
-                            if o.annotations.is_busy() {
-                                o.annotations.release(p);
-                            } else {
-                                o.selection.release(p.0.round() as i32, p.1.round() as i32);
-                            }
-                            cx.notify();
-                        });
-                    });
-                },
-            )
-            .absolute()
-            .size_full(),
-        )
+        let monitor = &self.monitor;
+        let under = o
+            .features
+            .iter()
+            .flat_map(|f| f.under_dim(monitor, window))
+            .collect::<Vec<_>>();
+        let over = o.features.iter().flat_map(|f| f.over_dim(monitor.rect));
+        self.listening(root, o, cx)
+            .children(under)
+            .children(dims(o, monitor))
+            .children(selection_marks(o, monitor))
+            .children(over)
+            .children(bars(&self.overlay, o, monitor))
+            .child(pointer_listeners(self.overlay.clone(), monitor.rect))
     }
+}
+
+/// The screen as it was at the trigger.
+fn frozen_screen(image: Option<&Arc<RenderImage>>) -> gpui::Stateful<Div> {
+    let root = div().id("overlay").size_full().relative().bg(gpui::black());
+    root.children(image.map(|image| {
+        img(ImageSource::Render(image.clone()))
+            .absolute()
+            .size_full()
+            .object_fit(ObjectFit::Fill)
+    }))
+}
+
+/// Everything on `monitor` but the selection, darkened.
+fn dims(o: &Overlay, monitor: &MonitorInfo) -> impl Iterator<Item = Div> {
+    let clear = match o.selection.mode {
+        Mode::Region => o.selection.region(),
+        Mode::Screens => o.selection.is_picked(&monitor.name).then_some(monitor.rect),
+    };
+    layout::dim_rects(monitor.rect, clear)
+        .into_iter()
+        .map(|r| rect_div(r).bg(DIM))
+}
+
+/// The selection's outline, handles and size on `monitor`, or the screen picked.
+fn selection_marks(o: &Overlay, monitor: &MonitorInfo) -> Vec<AnyElement> {
+    let hovered = o.selection.hovered().is_some_and(|m| m.name == monitor.name);
+    match o.selection.mode {
+        Mode::Region => region_marks(o, monitor.rect, hovered),
+        Mode::Screens => {
+            let picked = o.selection.is_picked(&monitor.name);
+            vec![screen_mark(picked, hovered, monitor).into_any_element()]
+        }
+    }
+}
+
+fn region_marks(o: &Overlay, monitor: Rect, hovered: bool) -> Vec<AnyElement> {
+    let region = o.selection.region();
+    let Some(selected) = region.filter(|r| r.intersect(monitor).is_some()) else {
+        // Nothing selected yet: the screen a click would select.
+        let hint = (region.is_none() && hovered).then(|| {
+            let outline = rect_div(local(monitor, monitor)).border_2();
+            outline
+                .border_color(hsla(0.58, 0.85, 0.55, 0.5))
+                .into_any_element()
+        });
+        return hint.into_iter().collect();
+    };
+    let shown = local(selected, monitor);
+    let handles = (!o.busy() && !o.holds_a_tool()).then(|| region_handles(shown));
+    let outline = rect_div(shown).border_1().border_color(ACCENT).into_any_element();
+    let label = size_label(selected, shown, monitor.h).into_any_element();
+    std::iter::once(outline)
+        .chain(handles.into_iter().flatten())
+        .chain([label])
+        .collect()
+}
+
+/// The eight resize handles of `region` (window coordinates).
+fn region_handles(region: Rect) -> impl Iterator<Item = AnyElement> {
+    let (mid_x, mid_y) = (region.x + region.w / 2, region.y + region.h / 2);
+    let (left, top, right, bottom) = (region.x, region.y, region.right(), region.bottom());
+    [
+        (left, top),
+        (mid_x, top),
+        (right, top),
+        (right, mid_y),
+        (right, bottom),
+        (mid_x, bottom),
+        (left, bottom),
+        (left, mid_y),
+    ]
+    .into_iter()
+    .map(|(x, y)| handle_div(x, y).into_any_element())
+}
+
+/// `selected`'s size, under it (shown at `shown`), or above it at the bottom of the screen.
+fn size_label(selected: Rect, shown: Rect, screen_height: i32) -> Div {
+    let top = if shown.bottom() + 28 < screen_height {
+        shown.bottom() + 8
+    } else {
+        (shown.y - 30).max(0)
+    };
+    div()
+        .absolute()
+        .left(px(shown.x.max(0) as f32))
+        .top(px(top as f32))
+        .px_2()
+        .rounded_sm()
+        .bg(rgba(0x000000c0))
+        .text_xs()
+        .text_color(gpui::white())
+        .child(format!("{} × {}", selected.w, selected.h))
+}
+
+/// A screen in Screens mode: its name, with a border when picked or under the pointer.
+fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
+    let border = if picked {
+        ACCENT
+    } else if hovered {
+        hsla(0., 0., 1., 0.5)
+    } else {
+        hsla(0., 0., 0., 0.)
+    };
+    let name = div()
+        .px_4()
+        .py_2()
+        .rounded_lg()
+        .bg(rgba(0x000000a0))
+        .text_2xl()
+        .font_weight(FontWeight::BOLD)
+        .text_color(gpui::white())
+        .child(format!("{}{}", if picked { "✓ " } else { "" }, monitor.name));
+    let area = rect_div(local(monitor.rect, monitor.rect))
+        .border_4()
+        .border_color(border);
+    area.flex().items_center().justify_center().child(name)
+}
+
+/// The toolbar and the action bar, on the screen under the pointer (all of them until the
+/// pointer is seen), hidden while dragging so they never get in the way.
+fn bars(overlay: &Entity<Overlay>, o: &Overlay, monitor: &MonitorInfo) -> Vec<AnyElement> {
+    let elsewhere = o.selection.hovered().is_some_and(|m| m.name != monitor.name);
+    if o.busy() || elsewhere {
+        return Vec::new();
+    }
+    let leaving = matches!(o.phase, Phase::Leaving);
+    let edge = layout::toolbar_edge(monitor.rect, o.selection.region());
+    vec![
+        toolbar(overlay, o, edge, leaving),
+        action_bar(overlay, o, leaving),
+    ]
+}
+
+/// The toolbar: the overlay's row, then the features' rows (and popup), growing away from
+/// its screen edge.
+fn toolbar(overlay: &Entity<Overlay>, o: &Overlay, edge: Edge, leaving: bool) -> AnyElement {
+    let acts = (0..o.features.len()).map(|index| Overlay::act(overlay, index));
+    let features = o.features.iter().zip(acts).filter(|_| o.tools_ready);
+    let (rows, popups): (Vec<_>, Vec<_>) = features.map(|(f, act)| (f.rows(&act), f.popup(&act))).unzip();
+    let rows = std::iter::once(main_row(overlay, o).into_any_element()).chain(rows.into_iter().flatten());
+    let column = stack(rows.collect(), popups.into_iter().flatten().next(), edge);
+    let place = div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(column);
+    let offset = match edge {
+        Edge::Top => actions::EDGE_GAP,
+        Edge::Bottom => actions::EDGE_GAP + actions::ACTION_BAR_ROOM,
+    };
+    actions::slide(place, edge, offset, leaving, "toolbar")
+}
+
+/// `rows` (and `popup`) stacked away from the screen `edge`.
+fn stack(rows: Vec<AnyElement>, popup: Option<AnyElement>, edge: Edge) -> Div {
+    let column = div().flex().flex_col().items_center().gap_1();
+    match edge {
+        Edge::Top => column.children(rows).children(popup),
+        Edge::Bottom => column.children(popup).children(rows.into_iter().rev()),
+    }
+}
+
+/// The overlay's own row: what to select, the features' buttons, and close.
+fn main_row(overlay: &Entity<Overlay>, o: &Overlay) -> Div {
+    let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| tools::on(overlay, f);
+    let (mode, all) = (o.selection.mode, o.selection.is_all());
+    let region = tools::button("region", "Region  R", mode == Mode::Region);
+    let screens = tools::button("screens", "Screens  S", mode == Mode::Screens && !all);
+    let feature_buttons = o.features.iter().enumerate();
+    let feature_buttons =
+        feature_buttons.flat_map(|(index, f)| f.main_buttons(&Overlay::act(overlay, index)));
+    panel()
+        .child(region.on_click(act(|o, cx| o.set_mode(Mode::Region, cx))))
+        .child(screens.on_click(act(|o, cx| o.set_mode(Mode::Screens, cx))))
+        .child(tools::button("all", "All screens  A", all).on_click(act(Overlay::select_all)))
+        .child(separator())
+        .children(feature_buttons)
+        .child(tools::button("close", "✕", false).on_click(act(Overlay::cancel)))
+}
+
+fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, leaving: bool) -> AnyElement {
+    let ctx = Ctx {
+        selection: &o.selection,
+    };
+    let features = o.features.iter().enumerate();
+    let actions = features.map(|(index, f)| f.actions(&Overlay::act(overlay, index), &ctx));
+    actions::action_bar(actions.collect(), o.notice.as_ref(), leaving)
+}
+
+/// Window-wide listeners: during a drag the compositor keeps sending pointer events to the
+/// surface where it started, even past its edge, so selections can span monitors.
+fn pointer_listeners(overlay: Entity<Overlay>, monitor: Rect) -> impl IntoElement {
+    let listen = move |_, (), window: &mut Window, _: &mut App| {
+        let moving = overlay.clone();
+        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble {
+                let point = to_global(monitor, e.position);
+                moving.update(cx, |o, cx| o.motion(point, cx));
+            }
+        });
+        let releasing = overlay.clone();
+        window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                let point = to_global(monitor, e.position);
+                releasing.update(cx, |o, cx| o.release(point, cx));
+            }
+        });
+    };
+    canvas(|_, _, _| (), listen).absolute().size_full()
 }
