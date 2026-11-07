@@ -61,8 +61,9 @@ screencapture list                # screen names and geometry
 screencapture daemon              # stay resident so the overlay opens instantly
 ```
 
-`-o DIR` picks the folder (default `~/Pictures/Screenshots`); it is remembered in
-`~/.config/screencapture/config.json`. The overlay's folder button changes it too.
+The saved path is printed on stdout. `-o DIR` picks the folder (default
+`~/Pictures/Screenshots`); it is remembered in `~/.config/screencapture/config.json`. The
+overlay's "Save in" button (`O`) changes it too.
 
 The drawing palette defaults to six pastels (soft red, orange, yellow, green, blue, purple)
 plus white and black.
@@ -72,15 +73,15 @@ are used:
 ```json
 { "palette": ["#FF8A80", "#8EE4A1", "#8AB8FFC0"] }
 ```
-The saved path is printed on stdout.
 
 The screens are **frozen** the moment the overlay opens: you select (and draw) on that still
 image, so moving content, menus or tooltips are captured exactly as they were at the trigger.
 Nothing is saved until `Enter` (or the Capture button).
 
 The bar at the bottom holds what to do with the selection: **● Record** (`V`; `Shift+V` records
-every screen), **Capture** (`Enter`), and the recording settings (frame rate, resolution, format,
-quality, sound), which a click steps through and which are remembered. When a recording starts,
+every screen), **Capture** (`Enter`), the recording settings (frame rate, resolution, format,
+quality, sound), which a click steps through and which are remembered, and the videos' folder
+(`Shift+O`). When a recording starts,
 the bars slide away and the overlay closes; drawings stay on screen and are recorded, so they can
 be prepared beforehand. See [Recording](#recording).
 
@@ -89,7 +90,7 @@ Selecting:
   corners to resize, drag inside to move, arrows nudge, `Shift`+arrows resize. A click outside
   clears it.
 - Screens mode (`S`): click screens to toggle them. `A` picks every screen.
-- `O` changes the folder; `Esc` or right-click cancels.
+- `O` changes the screenshots' folder, `Shift+O` the videos'; `Esc` or right-click cancels.
 
 Drawing works for every kind of capture (region, one screen, several, all). Shapes are drawn
 over the frozen desktop and burnt into the saved PNG at its full resolution; with stitched
@@ -133,8 +134,9 @@ screencapture record discard                  # stop and throw the recording awa
 screencapture record toggle                   # start the focused screen, or stop: one key for both
 ```
 
-Videos go to `~/Videos/Screencapture` (`screencast_<timestamp>.mp4`); `record … -o DIR` changes
-and remembers that folder, separately from the screenshot folder. With the daemon running it
+Videos go to `~/Videos/Screencapture` (`screencast_<timestamp>.mp4`); `record … -o DIR`, or the
+overlay's "Videos in" button (`Shift+O`), changes and remembers that folder, separately from the
+screenshots' folder. With the daemon running it
 records; without, the `record` command itself records until `record stop` or Ctrl+C. While a
 recording runs, Print (the overlay) does nothing but say so.
 

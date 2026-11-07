@@ -14,7 +14,8 @@ use crate::{
 #[derive(Parser, Debug)]
 #[command(version, about)]
 pub struct Cli {
-    /// Folder to save into (remembered for next time). Default: ~/Pictures/Screenshots.
+    /// Folder to save into (remembered for next time). Default: ~/Pictures/Screenshots, or
+    /// ~/Videos/Screencapture for `record`.
     #[arg(short, long, global = true, value_name = "DIR")]
     pub output: Option<PathBuf>,
 
