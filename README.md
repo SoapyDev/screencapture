@@ -191,3 +191,14 @@ cargo test -- --include-ignored # + live tests against the running compositor; t
                                 #   that a drawing is saved
 cargo clippy --all-targets      # pedantic + nursery; also try --no-default-features --features x11
 ```
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Use it,
+change it, ship it.
+
+The code was written largely by an AI assistant (Claude, through Claude Code) under human
+direction and review. It is offered openly for that reason: take what is useful.
+
+Unless you state otherwise, any contribution you submit for inclusion is dual-licensed as above,
+without any additional terms or conditions.

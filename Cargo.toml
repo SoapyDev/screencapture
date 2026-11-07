@@ -6,6 +6,8 @@ name = "screencapture"
 version = "0.1.0"
 edition = "2024"
 description = "Capture a region, a screen, or several screens stitched into one image"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/SoapyDev/screencapture"
 
 [dependencies]
 # GPUI has no recent crates.io release; track Zed's main branch, pinned to a known-good commit
