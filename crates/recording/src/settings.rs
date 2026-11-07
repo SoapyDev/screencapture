@@ -32,6 +32,7 @@ pub enum Fps {
 
 impl Fps {
     /// The rate of a fixed choice.
+    #[must_use]
     pub const fn fixed(self) -> Option<u32> {
         match self {
             Self::Native | Self::Adaptive => None,
@@ -65,6 +66,7 @@ pub enum Resolution {
 }
 
 impl Resolution {
+    #[must_use]
     pub const fn max_height(self) -> Option<u32> {
         match self {
             Self::Native => None,
@@ -117,6 +119,7 @@ pub enum Quality {
 
 impl Quality {
     /// One preset up (the finest stays).
+    #[must_use]
     pub const fn finer(self) -> Self {
         match self {
             Self::Medium => Self::High,
@@ -155,6 +158,7 @@ pub trait Choice: ValueEnum + Copy + PartialEq + 'static {
     fn name(self) -> &'static str;
 
     /// The next value, wrapping around.
+    #[must_use]
     fn next(self) -> Self {
         let all = Self::value_variants();
         let here = all.iter().position(|value| *value == self).unwrap_or(0);
@@ -279,6 +283,7 @@ impl From<Settings> for Overrides {
 }
 
 impl Overrides {
+    #[must_use]
     pub fn apply(self, base: Settings) -> Settings {
         Settings {
             fps: self.fps.unwrap_or(base.fps),
@@ -290,6 +295,7 @@ impl Overrides {
     }
 
     /// `key=value` words for the daemon protocol, unset ones left out.
+    #[must_use]
     pub fn encode(self) -> Vec<String> {
         fn word<T: ValueEnum>(key: &str, value: Option<T>) -> Option<String> {
             let value = value?.to_possible_value()?;
@@ -335,7 +341,7 @@ pub struct Recording {
     pub record: Settings,
 }
 
-impl crate::config::Section for Recording {}
+impl screencapture_core::config::Section for Recording {}
 
 impl Recording {
     /// Where to save: explicit choice, else remembered, else `~/Videos/Screencapture`.
@@ -347,6 +353,7 @@ impl Recording {
     }
 }
 
+#[must_use]
 pub fn default_video_dir() -> std::path::PathBuf {
     dirs::video_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Videos")))
@@ -514,7 +521,7 @@ mod tests {
 
     #[test]
     fn recording_settings_are_remembered() {
-        let mut config = crate::config::Config::default();
+        let mut config = screencapture_core::config::Config::default();
         let recording = Recording {
             record: Settings {
                 fps: Fps::F30,

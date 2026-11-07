@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use super::plan;
-use crate::capture::{MonitorInfo, Rect};
+use screencapture_core::capture::{MonitorInfo, Rect};
 
 /// One screen's share of a recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl Gaps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::plan::BORDER;
+    use crate::plan::BORDER;
 
     fn monitor(name: &str, x: i32) -> MonitorInfo {
         MonitorInfo {

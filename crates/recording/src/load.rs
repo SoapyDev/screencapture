@@ -10,6 +10,7 @@ pub struct CpuTimes {
 }
 
 /// The aggregate `cpu` line of `/proc/stat`.
+#[must_use]
 pub fn parse_proc_stat(text: &str) -> Option<CpuTimes> {
     let line = text.lines().find(|l| l.starts_with("cpu "))?;
     let ticks: Vec<u64> = line
@@ -27,6 +28,7 @@ pub fn parse_proc_stat(text: &str) -> Option<CpuTimes> {
 }
 
 /// Share of CPU time spent busy between two readings (0..=1).
+#[must_use]
 pub fn cpu_load(before: CpuTimes, after: CpuTimes) -> Option<f32> {
     let total = after.total.checked_sub(before.total).filter(|&t| t > 0)?;
     let busy = after.busy.saturating_sub(before.busy);
@@ -69,6 +71,7 @@ fn nvidia_gpu() -> Option<f32> {
 }
 
 /// The busier of CPU and GPU over `window` (0..=1), or `None` if neither could be read.
+#[must_use]
 pub fn sample(window: Duration) -> Option<f32> {
     // nvidia-smi takes tens of ms to answer: ask while the CPU is being measured.
     let gpu = std::thread::spawn(|| nvidia_gpu().or_else(sysfs_gpu));

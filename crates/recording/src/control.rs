@@ -10,7 +10,7 @@ use super::{
     session::{Finishing, Session},
     settings::{Fps, Overrides, Settings},
 };
-use crate::capture::{MonitorInfo, Rect};
+use screencapture_core::capture::{MonitorInfo, Rect};
 
 /// What a command did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +121,7 @@ impl Recorder {
     }
 
     /// The recorded area and the screens around it, for the frame shown while recording.
+    #[must_use]
     pub const fn frame(&self) -> Option<&OnScreen> {
         self.frame.as_ref()
     }
@@ -159,15 +160,15 @@ pub struct LiveEnv;
 
 impl Env for LiveEnv {
     fn monitors(&mut self) -> Result<Vec<MonitorInfo>> {
-        crate::capture::monitors()
+        screencapture_core::capture::monitors()
     }
 
     fn focused(&mut self) -> Option<String> {
-        crate::hyprland::focused_monitor()
+        screencapture_core::hyprland::focused_monitor()
     }
 
     fn settings(&mut self) -> (Settings, PathBuf) {
-        let recording: super::settings::Recording = crate::config::Config::load().section();
+        let recording: super::settings::Recording = screencapture_core::config::Config::load().section();
         (recording.record, recording.dir(None))
     }
 
@@ -183,6 +184,7 @@ impl Env for LiveEnv {
 
 impl Outcome {
     /// The file finished, if it still needed it (slow for joined screens): never `Finishing`.
+    #[must_use]
     pub fn finished(self) -> Self {
         let Self::Finishing(finishing) = self else {
             return self;
@@ -194,7 +196,7 @@ impl Outcome {
     }
 
     /// Tell `client` (after finishing the file, if needed).
-    pub fn answer(self, mut client: crate::daemon::Client) {
+    pub fn answer(self, mut client: screencapture_core::daemon::Client) {
         let (reply, notes) = self.reply();
         for note in &notes {
             client.note(note);
@@ -203,8 +205,9 @@ impl Outcome {
     }
 
     /// The daemon's answer for it (after finishing the file, if needed).
-    pub fn reply(self) -> (crate::daemon::Reply, Vec<String>) {
-        use crate::daemon::Reply;
+    #[must_use]
+    pub fn reply(self) -> (screencapture_core::daemon::Reply, Vec<String>) {
+        use screencapture_core::daemon::Reply;
         match self.finished() {
             Self::Started { path, notes } => (Reply::Recording(path), notes),
             Self::Saved(path) => (Reply::Saved(path), Vec::new()),
@@ -224,7 +227,7 @@ impl Outcome {
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    use crate::capture::Rect;
+    use screencapture_core::capture::Rect;
 
     pub struct Fake {
         pub dir: tempfile::TempDir,
@@ -276,7 +279,9 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::{testing::Fake, *};
-    use crate::{daemon::Reply, record::settings::Format};
+    use screencapture_core::daemon::Reply;
+
+    use crate::settings::Format;
 
     #[test]
     fn outcomes_become_replies() {

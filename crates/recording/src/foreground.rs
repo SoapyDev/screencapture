@@ -1,5 +1,6 @@
-//! Recording without the daemon: this process records, and takes the daemon's place on the
-//! socket until the recording ends, so `screencapture record stop` (and Print, which is told a
+//! Recording without the daemon: this process records.
+//!
+//! It takes the daemon's place on the socket until the recording ends, so `screencapture record stop` (and Print, which is told a
 //! recording runs) work the same.
 
 use std::{
@@ -13,7 +14,7 @@ use std::{
 };
 
 use super::{Env, Outcome, Recorder, command::Command};
-use crate::daemon::{self, Client, Reply, Request};
+use screencapture_core::daemon::{self, Client, Reply, Request};
 
 /// The recorded areas (one per screen) and the screens, while recording; `None` once it ended.
 pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<&super::OnScreen>);
@@ -102,7 +103,7 @@ fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{control::testing::Fake, plan::Target, settings::Overrides};
+    use crate::{control::testing::Fake, plan::Target, settings::Overrides};
 
     fn recording() -> (
         tempfile::TempDir,
@@ -129,7 +130,7 @@ mod tests {
             .expect("a recording was just started")
             .to_path_buf();
         let client = std::thread::spawn(move || {
-            let print = daemon::request(&socket, crate::selection::Mode::Region)
+            let print = daemon::request(&socket, screencapture_core::selection::Mode::Region)
                 .unwrap()
                 .unwrap();
             let start = daemon::send(

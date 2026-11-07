@@ -82,7 +82,7 @@ impl Active {
     ) -> Result<Self> {
         let ext = if job.gif { "gif" } else { "mp4" };
         // Reserved now, so no other file can take the name; the recorder writes over it.
-        let (path, _) = crate::naming::reserve(dir, "screencast", ext, time)?;
+        let (path, _) = screencapture_core::naming::reserve(dir, "screencast", ext, time)?;
         let video = if job.gif {
             path.with_extension("part.mp4")
         } else {
@@ -311,6 +311,7 @@ fn first_frame_file(video: &Path) -> PathBuf {
 }
 
 /// The monotonic µs in a first-frame timestamp file (a header line, then the values).
+#[must_use]
 pub fn parse_first_frame(text: &str) -> Option<u64> {
     let values = text.lines().rev().find(|line| !line.trim().is_empty())?;
     values.split_whitespace().next()?.parse().ok()
@@ -350,7 +351,7 @@ pub const FAKE_RECORDER: &str = r#"out="$1"; trap 'echo end >> "$out"; exit 0' I
 /// Run `script` (see [`FAKE_RECORDER`]) as the recorder of `job`, in `dir`.
 #[cfg(test)]
 pub fn spawn_fake(dir: &Path, script: &str, job: Job) -> Result<Active> {
-    let (path, _) = crate::naming::reserve(dir, "screencast", "mp4", chrono::Local::now())?;
+    let (path, _) = screencapture_core::naming::reserve(dir, "screencast", "mp4", chrono::Local::now())?;
     let stamp = PathBuf::from(format!("{}.ts", path.display()));
     let files = Files {
         path: path.clone(),
@@ -387,12 +388,11 @@ impl Files {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use screencapture_core::capture::Rect;
+
     use crate::{
-        capture::Rect,
-        record::{
-            plan::Codec,
-            settings::{Audio, Quality},
-        },
+        plan::Codec,
+        settings::{Audio, Quality},
     };
 
     fn job(gif: bool) -> Job {
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     #[ignore = "records the screen with the installed recorder"]
     fn records_a_real_clip() {
-        let monitors = crate::capture::monitors().unwrap();
+        let monitors = screencapture_core::capture::monitors().unwrap();
         let m = &monitors[0];
         let area = Rect::new(m.rect.x + 100, m.rect.y + 100, 640, 360);
         let job = Job {
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     #[ignore = "records the screen with the installed recorder and ffmpeg"]
     fn records_a_real_gif() {
-        let monitors = crate::capture::monitors().unwrap();
+        let monitors = screencapture_core::capture::monitors().unwrap();
         let m = &monitors[0];
         let job = Job {
             area: Rect::new(m.rect.x + 100, m.rect.y + 100, 320, 240),

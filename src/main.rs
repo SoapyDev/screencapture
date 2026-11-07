@@ -1,6 +1,5 @@
 mod cli;
 mod overlay;
-mod record;
 
 #[cfg(all(target_os = "linux", not(any(feature = "wayland", feature = "x11"))))]
 compile_error!("enable at least one of the `wayland` or `x11` features");
@@ -9,11 +8,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use screencapture_capture::{job, save};
-use screencapture_core::{capture, clipboard, config, drawings, memory, naming, selection};
+use screencapture_core::{capture, clipboard, config, drawings, memory, selection};
 #[cfg(unix)]
 use screencapture_core::{daemon, hyprland};
 pub use screencapture_core::{trace, trace_restart};
 use screencapture_editing::{annotate, text};
+use screencapture_recording as record;
 
 use crate::{
     cli::{Cli, Plan},

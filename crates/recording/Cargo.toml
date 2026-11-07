@@ -1,0 +1,33 @@
+[package]
+name = "screencapture-recording"
+description = "Screen recording: one recorder per screen, joined at stop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+screencapture-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Ctrl+C while recording without the daemon: a safe, signal-safe flag.
+signal-hook.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[features]
+# The frame around the recorded area needs layer-shell surfaces.
+wayland = []
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

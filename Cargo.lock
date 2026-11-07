@@ -4823,9 +4823,9 @@ dependencies = [
  "screencapture-capture",
  "screencapture-core",
  "screencapture-editing",
+ "screencapture-recording",
  "serde",
  "serde_json",
- "signal-hook",
  "smallvec",
  "tempfile",
  "wayland-client",
@@ -4875,6 +4875,22 @@ dependencies = [
  "image",
  "screencapture-core",
  "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "screencapture-recording"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs",
+ "rustix 1.1.6",
+ "screencapture-core",
+ "serde",
+ "serde_json",
+ "signal-hook",
  "tempfile",
 ]
 

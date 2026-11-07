@@ -15,6 +15,7 @@ repository = "https://github.com/SoapyDev/screencapture"
 screencapture-core = { path = "crates/core", default-features = false }
 screencapture-editing = { path = "crates/editing" }
 screencapture-capture = { path = "crates/capture" }
+screencapture-recording = { path = "crates/recording" }
 # GPUI has no recent crates.io release; track Zed's main branch, pinned to a known-good commit
 # (same as gpui-calculator). To update, change `rev` to a newer commit from main.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b" }
@@ -76,6 +77,7 @@ repository.workspace = true
 screencapture-core.workspace = true
 screencapture-editing.workspace = true
 screencapture-capture.workspace = true
+screencapture-recording.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true
@@ -93,7 +95,6 @@ futures.workspace = true
 # Linux: each display server's code is only compiled when its feature is on.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
-signal-hook.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
@@ -101,7 +102,11 @@ rustix.workspace = true
 [features]
 default = ["wayland"]
 # Wayland: gpui's Wayland backend (layer-shell overlay) + native wlr-screencopy capture.
-wayland = ["gpui_platform/wayland", "screencapture-core/wayland"]
+wayland = [
+    "gpui_platform/wayland",
+    "screencapture-core/wayland",
+    "screencapture-recording/wayland",
+]
 # X11: gpui's X11 backend + xcap capture.
 x11 = ["gpui_platform/x11", "screencapture-core/x11"]
 
@@ -140,6 +145,12 @@ rustflags = ["-Zpolonius=next"]
 rustflags = ["-Zpolonius=next"]
 
 [profile.release.package.screencapture-capture]
+rustflags = ["-Zpolonius=next"]
+
+[profile.dev.package.screencapture-recording]
+rustflags = ["-Zpolonius=next"]
+
+[profile.release.package.screencapture-recording]
 rustflags = ["-Zpolonius=next"]
 
 [profile.dev.package."*"]

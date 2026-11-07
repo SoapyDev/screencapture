@@ -1,7 +1,7 @@
 //! Recording commands, as the client sends them to the daemon (one line, words).
 
 use super::{plan::Target, settings::Overrides};
-use crate::capture::Rect;
+use screencapture_core::capture::Rect;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -15,7 +15,7 @@ pub enum Command {
 
 /// Recording requests travel to the daemon as `record <words>`.
 #[cfg(unix)]
-impl crate::daemon::Extension for Command {
+impl screencapture_core::daemon::Extension for Command {
     const WORD: &'static str = "record";
 
     fn encode(&self) -> String {
@@ -29,6 +29,7 @@ impl crate::daemon::Extension for Command {
 
 impl Command {
     /// Words after `record`.
+    #[must_use]
     pub fn encode(&self) -> String {
         let (verb, target, overrides) = match self {
             Self::Stop => return "stop".into(),
@@ -90,6 +91,7 @@ impl Command {
     }
 
     /// Whether this would start a recording if none runs.
+    #[must_use]
     pub const fn starts(&self) -> bool {
         !matches!(self, Self::Stop | Self::Discard)
     }
@@ -98,7 +100,7 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::settings::{Format, Fps};
+    use crate::settings::{Format, Fps};
 
     #[test]
     fn commands_round_trip() {

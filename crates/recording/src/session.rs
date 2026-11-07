@@ -9,7 +9,7 @@ use super::{
     plan::{Join, Plan},
     recorder::{self, Active, Backend, Stopped},
 };
-use crate::capture::Rect;
+use screencapture_core::capture::Rect;
 
 pub struct Session {
     /// The recorders, one per screen, and where each lands in the joined video.
@@ -38,7 +38,7 @@ impl Session {
             return Ok(Self::single(active));
         };
         let ext = if join.gif { "gif" } else { "mp4" };
-        let (path, _) = crate::naming::reserve(dir, "screencast", ext, time)?;
+        let (path, _) = screencapture_core::naming::reserve(dir, "screencast", ext, time)?;
         let started = start_parts(backend, plan, &path);
         if started.is_err() {
             let _ = std::fs::remove_file(&path);
@@ -51,6 +51,7 @@ impl Session {
     }
 
     /// A recording made by `active` alone.
+    #[must_use]
     pub fn single(active: Active) -> Self {
         let path = active.path.clone();
         Self {
@@ -60,6 +61,7 @@ impl Session {
         }
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -240,14 +242,14 @@ fn encode_joined(inputs: &[Input], plan: &Join, video: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{
+    use crate::{
         plan::{Target, plan},
         settings::Settings,
     };
 
     /// Record `target` for a second with the installed recorder: the plan and the file.
     fn record_for_a_second(target: &Target) -> (Plan, PathBuf, tempfile::TempDir) {
-        let monitors = crate::capture::monitors().expect("a Wayland session lists its screens");
+        let monitors = screencapture_core::capture::monitors().expect("a Wayland session lists its screens");
         let plan =
             plan(target, Settings::default(), &monitors, None, None).expect("the target is recordable");
         let dir = tempfile::tempdir().expect("the system has a temporary folder");
@@ -303,8 +305,10 @@ mod tests {
     #[test]
     #[ignore = "records across two side-by-side screens with the installed recorder"]
     fn a_region_across_two_screens_is_one_video() {
-        let monitors = crate::capture::monitors().expect("a Wayland session lists its screens");
-        let touching = |m: &&crate::capture::MonitorInfo| monitors.iter().any(|n| n.rect.x == m.rect.right());
+        let monitors = screencapture_core::capture::monitors().expect("a Wayland session lists its screens");
+        let touching = |m: &&screencapture_core::capture::MonitorInfo| {
+            monitors.iter().any(|n| n.rect.x == m.rect.right())
+        };
         let seam = monitors
             .iter()
             .find(touching)

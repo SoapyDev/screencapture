@@ -10,7 +10,7 @@ use super::{
     plan::{Codec, Join},
     settings::Quality,
 };
-use crate::capture::Rect;
+use screencapture_core::capture::Rect;
 
 /// One part's video and its place in the joined one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +32,7 @@ pub enum Encoder {
 
 /// How much of each part to skip, from their first frames' times (µs on one clock): the part
 /// that started last sets the start. Unknown times skip nothing.
+#[must_use]
 pub fn skips(first_frames: &[Option<u64>]) -> Vec<Duration> {
     let latest = first_frames.iter().flatten().max().copied().unwrap_or(0);
     first_frames
@@ -41,6 +42,7 @@ pub fn skips(first_frames: &[Option<u64>]) -> Vec<Duration> {
 }
 
 /// ffmpeg arguments joining `inputs` as `join` says into `out`.
+#[must_use]
 pub fn join_args(inputs: &[Input], join: &Join, out: &Path, encoder: Encoder) -> Vec<String> {
     let mut args = words(&["-v", "error", "-y", "-hwaccel", "auto"]);
     for input in inputs {

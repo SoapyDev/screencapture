@@ -25,8 +25,8 @@ mod control;
 
 /// A request to the daemon, recording ones included.
 #[cfg(unix)]
-pub type Request = crate::daemon::Request<command::Command>;
+pub type Request = screencapture_core::daemon::Request<command::Command>;
 
 /// A request the daemon received, recording ones included.
 #[cfg(unix)]
-pub type Pending = crate::daemon::Pending<command::Command>;
+pub type Pending = screencapture_core::daemon::Pending<command::Command>;

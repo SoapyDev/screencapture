@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use super::settings::{Audio, Format, Fps, Quality, Settings};
-use crate::capture::{MonitorInfo, Rect};
+use screencapture_core::capture::{MonitorInfo, Rect};
 
 /// Width of the red frame drawn around a recording, in logical px. It always sits outside the
 /// recorded area, so it is never in the video.
@@ -31,6 +31,7 @@ pub enum Codec {
 impl Codec {
     /// Largest picture side hardware encoders take (NVENC; AMD and Intel are the same or
     /// larger for these codecs).
+    #[must_use]
     pub const fn max_side(self) -> u32 {
         match self {
             Self::H264 => 4096,
@@ -80,6 +81,7 @@ pub struct Plan {
 
 impl Plan {
     /// What is recorded, in a few words, for the controls: `MP4 · AV1 · 60 fps · 3 screens`.
+    #[must_use]
     pub fn summary(&self) -> String {
         let first = &self.parts[0].job;
         let (codec, fps, gif) = self.join.map_or((first.codec, first.fps, first.gif), |join| {
@@ -162,6 +164,7 @@ pub fn inset(area: Rect, monitors: &[MonitorInfo]) -> Result<Rect> {
 }
 
 /// `area` shrunk where the strip just outside an edge, which the border needs, is on no screen.
+#[must_use]
 pub fn room_for_border(area: Rect, monitors: &[MonitorInfo]) -> Rect {
     let on_screen = |(x, y): (i32, i32)| monitors.iter().any(|m| m.rect.contains(x, y));
     // How far an edge must move in so that both ends of the strip outside it are on a screen.
@@ -201,6 +204,7 @@ pub fn frame_rate(fps: Fps, native: Option<u32>, load: Option<f32>) -> (u32, boo
 }
 
 /// Adaptive: lighter the busier the machine is.
+#[must_use]
 pub fn adaptive_tier(load: f32) -> u32 {
     match load {
         l if l < 0.5 => u32::MAX,
@@ -449,6 +453,7 @@ const fn audio_sources(audio: Audio) -> Option<&'static str> {
 }
 
 /// `gpu-screen-recorder` arguments.
+#[must_use]
 pub fn gsr_args(job: &Job, out: &Path) -> Vec<String> {
     let Rect { x, y, w, h } = job.area;
     let codec = match job.codec {
@@ -491,6 +496,7 @@ pub fn gsr_args(job: &Job, out: &Path) -> Vec<String> {
 
 /// `wf-recorder` arguments (fallback when gpu-screen-recorder is missing). It encodes on the
 /// CPU with these codecs, and records the default input when sound is on.
+#[must_use]
 pub fn wf_args(job: &Job, out: &Path) -> Vec<String> {
     let Rect { x, y, w, h } = job.area;
     let codec = match job.codec {
@@ -516,6 +522,7 @@ pub fn wf_args(job: &Job, out: &Path) -> Vec<String> {
 
 /// `ffmpeg` arguments turning the recorded `video` into `gif`: one palette for the whole clip,
 /// recomputed only where the picture changes.
+#[must_use]
 pub fn gif_args(fps: u32, video: &Path, gif: &Path) -> Vec<String> {
     let filter = format!(
         "fps={fps},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"

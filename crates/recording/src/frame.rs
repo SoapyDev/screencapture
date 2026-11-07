@@ -2,10 +2,11 @@
 //! click-through surface per monitor, only as big as what it shows.
 
 use super::plan::BORDER;
-use crate::capture::{MonitorInfo, Rect};
+use screencapture_core::capture::{MonitorInfo, Rect};
 
 /// The four strips of the frame around `area`, in desktop coordinates. They lie outside it,
 /// so the frame is never recorded.
+#[must_use]
 pub const fn strips(area: Rect) -> [Rect; 4] {
     let (l, t, r, b) = (area.x - BORDER, area.y - BORDER, area.right(), area.bottom());
     let across = area.w + 2 * BORDER;
@@ -39,6 +40,7 @@ pub struct Surface {
 
 /// Surfaces for the frame around `areas` (a recording's parts, one per screen), plus whatever
 /// `extra` (drawings' bounds) needs room on screen; monitors with nothing to show get none.
+#[must_use]
 pub fn surfaces(areas: &[Rect], extra: &[Rect], monitors: &[MonitorInfo]) -> Vec<Surface> {
     let frame = outline(areas);
     monitors
