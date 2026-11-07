@@ -22,18 +22,24 @@ pub fn dim_rects(monitor: Rect, selection: Option<Rect>) -> Vec<Rect> {
 }
 
 /// Which monitor a gpui display shows. gpui reports Wayland displays at their
-/// `wl_output.geometry` position (possibly divided by an integer scale), so try that first,
-/// then logical position; nearest wins.
+/// `wl_output.geometry` position, possibly divided by an integer scale: the smallest scale
+/// that fits wins (side by side, one screen's position halved can be another's), then the
+/// logical position, then the nearest.
 pub fn match_display(origin: (i32, i32), monitors: &[MonitorInfo]) -> Option<usize> {
-    let distance = |(x, y): (i32, i32)| (i64::from(x - origin.0)).abs() + (i64::from(y - origin.1)).abs();
-    let exact = |m: &MonitorInfo| {
-        (1..=3).any(|scale| (m.output_position.0 / scale, m.output_position.1 / scale) == origin)
+    let at_scale = |scale: i32| {
+        let scaled = |m: &MonitorInfo| (m.output_position.0 / scale, m.output_position.1 / scale);
+        monitors.iter().position(|m| scaled(m) == origin)
     };
-    monitors
-        .iter()
-        .position(exact)
+    (1..=3)
+        .find_map(at_scale)
         .or_else(|| monitors.iter().position(|m| (m.rect.x, m.rect.y) == origin))
-        .or_else(|| (0..monitors.len()).min_by_key(|&i| distance(monitors[i].output_position)))
+        .or_else(|| nearest(origin, monitors))
+}
+
+/// The monitor whose output position is nearest `origin`.
+fn nearest(origin: (i32, i32), monitors: &[MonitorInfo]) -> Option<usize> {
+    let distance = |(x, y): (i32, i32)| (i64::from(x - origin.0)).abs() + (i64::from(y - origin.1)).abs();
+    (0..monitors.len()).min_by_key(|&i| distance(monitors[i].output_position))
 }
 
 /// Height of the band the toolbar occupies at the top or bottom of a monitor.
@@ -115,6 +121,17 @@ mod tests {
         let monitors = [mon("A", 0, 200), mon("B", 200, 0)];
         assert_eq!(match_display((0, 0), &monitors), Some(1));
         assert_eq!(match_display((200, 0), &monitors), Some(0));
+    }
+
+    #[test]
+    fn an_unscaled_position_wins_over_a_halved_one() {
+        // Three screens side by side: the middle one's position is the right one's halved.
+        let monitors = [
+            mon("DP-1", 0, 0),
+            mon("DP-2", 5120, 5120),
+            mon("HDMI-A-1", 2560, 2560),
+        ];
+        assert_eq!(match_display((2560, 0), &monitors), Some(2));
     }
 
     #[test]
