@@ -6,7 +6,7 @@ use gpui::{AnyElement, Keystroke, prelude::*};
 
 use super::{
     feature::{Act, Actions, Ctx, Effect, Feature, SaveJob},
-    folder, tools,
+    folder, widgets,
 };
 use crate::{
     capture::Rect,
@@ -84,7 +84,7 @@ impl Feature for Capturing {
     }
 
     fn main_buttons(&self, act: &Act) -> Vec<AnyElement> {
-        let folder = tools::button("folder", self.folder_label(), false);
+        let folder = widgets::button("folder", self.folder_label(), false);
         vec![
             folder
                 .on_click(act.on(|me: &mut Self, _| me.browse()))
@@ -94,7 +94,7 @@ impl Feature for Capturing {
 
     fn actions(&self, act: &Act, ctx: &Ctx) -> Actions {
         let (label, ready) = capture_label(ctx);
-        let capture = tools::button("capture", label, ready);
+        let capture = widgets::button("capture", label, ready);
         let capture = capture.on_click(act.on(|me: &mut Self, ctx| me.save(ctx.selection.confirm())));
         Actions {
             main: vec![capture.into_any_element()],

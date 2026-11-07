@@ -7,7 +7,7 @@ use gpui::{AnyElement, App, Div, Keystroke, SharedString, Stateful, prelude::*};
 
 use super::{
     feature::{Act, Actions, Ctx, Effect, Feature, HandOver},
-    folder, tools,
+    folder, widgets,
 };
 use crate::{
     capture::Rect,
@@ -90,7 +90,20 @@ fn launch(command: Command, hand: HandOver, cx: &mut App) {
     if hand.resident {
         super::launch::through_daemon(command, hand.drawings, hand.client, cx);
     } else {
-        super::launch::in_this_process(command, hand.drawings, super::report_standalone_recording, cx);
+        super::launch::in_this_process(command, hand.drawings, report_standalone, cx);
+    }
+}
+
+/// The end of a recording started from a standalone overlay: like a saved capture, print it.
+fn report_standalone(outcome: anyhow::Result<crate::record::Outcome>) {
+    match outcome {
+        Ok(crate::record::Outcome::Saved(path)) => {
+            super::mark_saved();
+            println!("{}", path.display());
+        }
+        Ok(crate::record::Outcome::Failed(e)) => eprintln!("screencapture: {e}"),
+        Ok(other) => eprintln!("screencapture: recording: {other:?}"),
+        Err(e) => eprintln!("screencapture: {e:#}"),
     }
 }
 
@@ -102,7 +115,7 @@ fn setting_button<T: Choice>(
     field: fn(&mut Settings) -> &mut T,
 ) -> Stateful<Div> {
     let cycle = act.on(move |me: &mut Recordings, _| me.cycle_setting(field));
-    tools::button(id, value.label(), false).on_click(cycle)
+    widgets::button(id, value.label(), false).on_click(cycle)
 }
 
 /// What recording the selection means. Picking every screen is "all".
@@ -126,8 +139,8 @@ impl Feature for Recordings {
 
     fn actions(&self, act: &Act, _: &Ctx) -> Actions {
         let record = act.on(|me: &mut Self, ctx| me.record(false, ctx.selection));
-        let record = tools::button("record", "● Record  V", false).on_click(record);
-        let videos = tools::button("videos", SharedString::from(self.folder_label()), false);
+        let record = widgets::button("record", "● Record  V", false).on_click(record);
+        let videos = widgets::button("videos", SharedString::from(self.folder_label()), false);
         let videos = videos.on_click(act.on(|me: &mut Self, _| me.browse()));
         let settings = self
             .setting_buttons(act)

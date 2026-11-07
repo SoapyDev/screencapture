@@ -10,29 +10,30 @@
 //! the daemon it is the only work done before the windows open.
 
 mod actions;
-mod capturing;
+pub mod capturing;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod controls;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod drawer;
 mod drawn;
-mod editing;
+pub mod editing;
 pub mod feature;
 mod folder;
 #[cfg(unix)]
 mod gate;
 mod keys;
 #[cfg(target_os = "linux")]
-mod launch;
+pub mod launch;
 pub mod layout;
 mod recording;
 #[cfg(target_os = "linux")]
 pub mod recording_service;
 #[cfg(target_os = "linux")]
-mod recordings;
+pub mod recordings;
 #[cfg(unix)]
 pub mod service;
 mod tools;
+pub mod widgets;
 
 use std::{
     any::Any,
@@ -58,7 +59,6 @@ use smallvec::SmallVec;
 use crate::daemon;
 use crate::{
     capture::{MonitorInfo, Rect, Shot, Snapshot},
-    config::Config,
     drawings::Shared,
     selection::{Handle, Hit, Mode, Request, Selection},
     trace,
@@ -66,9 +66,6 @@ use crate::{
 
 use feature::{Act, Ctx, Effect, Feature, HandOver, Picked, SaveJob, Start};
 use layout::Edge;
-
-#[cfg(target_os = "linux")]
-pub use launch::with_recording_frame;
 
 enum Phase {
     Selecting,
@@ -173,22 +170,28 @@ pub struct Overlay {
     notice: Option<SharedString>,
 }
 
-/// The features built into this program, with their remembered settings, in the order they are
-/// asked (and their actions shown).
-pub fn features() -> Vec<Box<dyn Feature>> {
-    let config = Config::load();
-    vec![
-        Box::new(editing::Editing::new(config.section())),
-        #[cfg(target_os = "linux")]
-        Box::new(recordings::Recordings::new(config.section())),
-        Box::new(capturing::Capturing::new(config.section())),
-    ]
+/// How the program makes its features, in the order they are asked (and their actions shown):
+/// fresh for every overlay, with the settings remembered then.
+pub type MakeFeatures = fn() -> Vec<Box<dyn Feature>>;
+
+struct FeatureList(MakeFeatures);
+
+impl gpui::Global for FeatureList {}
+
+/// A standalone run saved something (recordings included): the process exits with success.
+pub fn mark_saved() {
+    SAVED.store(true, Ordering::Relaxed);
 }
 
 /// Open the overlay once `frozen` (started before gpui, to overlap its start-up) is ready, and
 /// run until the capture is saved or cancelled. Returns whether a file was saved.
-pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>) -> bool {
+pub fn run(
+    mode: Mode,
+    frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>,
+    features: MakeFeatures,
+) -> bool {
     gpui_platform::application().run(move |cx: &mut App| {
+        cx.set_global(FeatureList(features));
         trace("gpui ready");
         // Overlays get closed and reopened around the folder picker; don't quit in between.
         cx.set_quit_mode(QuitMode::Explicit);
@@ -205,23 +208,9 @@ pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>) 
 
 /// Saves are made at once (~20 µs), so they land in the order the user made them; one that
 /// failed is reported, naming `what` changed.
-fn report_unremembered(saved: anyhow::Result<()>, what: &str) {
+pub fn report_unremembered(saved: anyhow::Result<()>, what: &str) {
     if let Err(e) = saved {
         eprintln!("screencapture: could not remember {what}: {e:#}");
-    }
-}
-
-/// The end of a recording started from a standalone overlay: like a saved capture, print it.
-#[cfg(target_os = "linux")]
-fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) {
-    match outcome {
-        Ok(crate::record::Outcome::Saved(path)) => {
-            SAVED.store(true, Ordering::Relaxed);
-            println!("{}", path.display());
-        }
-        Ok(crate::record::Outcome::Failed(e)) => eprintln!("screencapture: {e}"),
-        Ok(other) => eprintln!("screencapture: recording: {other:?}"),
-        Err(e) => eprintln!("screencapture: {e:#}"),
     }
 }
 
@@ -236,8 +225,13 @@ enum ToUi {
 /// Resident mode: initialise the GPU once, then open an overlay per client request, and let
 /// `service` answer requests of its own.
 #[cfg(unix)]
-pub fn run_daemon(listener: std::os::unix::net::UnixListener, service: impl service::Service) {
+pub fn run_daemon(
+    listener: std::os::unix::net::UnixListener,
+    service: impl service::Service,
+    features: MakeFeatures,
+) {
     gpui_platform::application().run(move |cx: &mut App| {
+        cx.set_global(FeatureList(features));
         cx.set_quit_mode(QuitMode::Explicit);
         warm_up(cx);
         // This process outlives every capture: it can keep the copied image on offer itself.
@@ -407,6 +401,7 @@ fn start(
         .map(|(m, image)| (m.name.clone(), image.clone()))
         .collect();
     let selection = selection_at_pointer(mode, &screens);
+    let features = (cx.global::<FeatureList>().0)();
     let overlay = cx.new(|cx: &mut Context<Overlay>| {
         // However the overlay goes away (the compositor may close every window, e.g. on an
         // output change), the client gets an answer and the daemon takes new requests.
@@ -420,7 +415,7 @@ fn start(
             #[cfg(unix)]
             client,
             resident,
-            features: features(),
+            features,
             tools_ready: false,
             traced: std::cell::Cell::new(false),
             notice: None,
@@ -748,7 +743,7 @@ impl Overlay {
     fn report(&self, outcome: &anyhow::Result<Option<PathBuf>>) {
         match outcome {
             Ok(Some(path)) if !self.resident => {
-                SAVED.store(true, Ordering::Relaxed);
+                mark_saved();
                 println!("{}", path.display());
             }
             Ok(_) => {}
@@ -1359,20 +1354,20 @@ fn stack(rows: Vec<AnyElement>, popup: Option<AnyElement>, edge: Edge) -> Div {
 
 /// The overlay's own row: what to select, the features' buttons, and close.
 fn main_row(overlay: &Entity<Overlay>, o: &Overlay) -> Div {
-    let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| tools::on(overlay, f);
+    let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| widgets::on(overlay, f);
     let (mode, all) = (o.selection.mode, o.selection.is_all());
-    let region = tools::button("region", "Region  R", mode == Mode::Region);
-    let screens = tools::button("screens", "Screens  S", mode == Mode::Screens && !all);
+    let region = widgets::button("region", "Region  R", mode == Mode::Region);
+    let screens = widgets::button("screens", "Screens  S", mode == Mode::Screens && !all);
     let feature_buttons = o.features.iter().enumerate();
     let feature_buttons =
         feature_buttons.flat_map(|(index, f)| f.main_buttons(&Overlay::act(overlay, index)));
     panel()
         .child(region.on_click(act(|o, cx| o.set_mode(Mode::Region, cx))))
         .child(screens.on_click(act(|o, cx| o.set_mode(Mode::Screens, cx))))
-        .child(tools::button("all", "All screens  A", all).on_click(act(Overlay::select_all)))
+        .child(widgets::button("all", "All screens  A", all).on_click(act(Overlay::select_all)))
         .child(separator())
         .children(feature_buttons)
-        .child(tools::button("close", "✕", false).on_click(act(Overlay::cancel)))
+        .child(widgets::button("close", "✕", false).on_click(act(Overlay::cancel)))
 }
 
 fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, leaving: bool) -> AnyElement {

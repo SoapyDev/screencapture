@@ -11,7 +11,7 @@ use gpui::{
 
 use super::{
     drawer::{self, Change, Drawer},
-    recording, tools,
+    recording, widgets,
 };
 use crate::{
     capture::MonitorInfo,
@@ -234,7 +234,7 @@ fn command_button(
 ) -> impl IntoElement {
     let controls = controls.clone();
     let label: SharedString = label.into();
-    tools::button(id, label, false).on_click(move |_, _, cx| {
+    widgets::button(id, label, false).on_click(move |_, _, cx| {
         let command = command.clone();
         controls.update(cx, |controls, cx| controls.send(command, cx));
     })

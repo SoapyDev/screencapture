@@ -16,6 +16,7 @@ use super::{
     feature::{Act, Ctx, Effect, Feature, Point},
     handle_div, keys, local, rect_div,
     tools::{self, TextKey},
+    widgets,
 };
 use crate::{
     annotate::{self, Annotations, Color, Grab, Palette, Shape, Target, Tool},
@@ -226,7 +227,7 @@ impl Editing {
             .top(px(outline.y as f32 + y))
             .w(px(2.))
             .h(px(h))
-            .bg(tools::color(shape.color));
+            .bg(widgets::color(shape.color));
         vec![
             rect_div(outline)
                 .border_1()

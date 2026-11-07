@@ -50,13 +50,29 @@ fn main() -> ExitCode {
     }
 }
 
+/// The features built into this program, with their remembered settings, in the order they are
+/// asked (and their actions shown).
+fn features() -> Vec<Box<dyn overlay::feature::Feature>> {
+    let config = config::Config::load();
+    vec![
+        Box::new(overlay::editing::Editing::new(config.section())),
+        #[cfg(target_os = "linux")]
+        Box::new(overlay::recordings::Recordings::new(config.section())),
+        Box::new(overlay::capturing::Capturing::new(config.section())),
+    ]
+}
+
 /// The daemon, with what this program serves besides the overlay.
 #[cfg(unix)]
 fn run_daemon(listener: std::os::unix::net::UnixListener) {
     #[cfg(target_os = "linux")]
-    overlay::run_daemon(listener, overlay::recording_service::Recording::default());
+    overlay::run_daemon(
+        listener,
+        overlay::recording_service::Recording::default(),
+        features,
+    );
     #[cfg(not(target_os = "linux"))]
-    overlay::run_daemon(listener, overlay::service::NoService);
+    overlay::run_daemon(listener, overlay::service::NoService, features);
 }
 
 /// An explicit `-o` folder becomes the remembered one: for videos when recording.
@@ -112,7 +128,7 @@ fn overlay_mode(mode: selection::Mode) -> ExitCode {
     }
     // Freeze the screens now, overlapping gpui start-up.
     let frozen = std::thread::spawn(overlay::freeze);
-    if overlay::run(mode, frozen) {
+    if overlay::run(mode, frozen, features) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -140,13 +156,13 @@ fn record(command: record::command::Command) -> ExitCode {
                 reply: daemon::Reply::NotRecording,
                 notes: Vec::new(),
             }),
-            None => {
-                overlay::with_recording_frame(move |show| record::foreground::run(command, &socket, show))
-                    .map(|outcome| {
-                        let (reply, notes) = outcome.reply();
-                        daemon::Answer { reply, notes }
-                    })
-            }
+            None => overlay::launch::with_recording_frame(move |show| {
+                record::foreground::run(command, &socket, show)
+            })
+            .map(|outcome| {
+                let (reply, notes) = outcome.reply();
+                daemon::Answer { reply, notes }
+            }),
         };
         report_record(answer)
     }
