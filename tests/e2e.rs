@@ -6,7 +6,10 @@
 #[path = "support/pointer.rs"]
 mod pointer;
 
-use std::{path::Path, process::Command};
+use std::{
+    path::Path,
+    process::{Command, Output},
+};
 
 #[cfg(feature = "wayland")]
 use pointer::{Pointer, Spot};
@@ -23,6 +26,13 @@ fn bin() -> Command {
     cmd.env_remove("HYPRLAND_INSTANCE_SIGNATURE");
     cmd.env("SCREENCAPTURE_NO_CLIPBOARD", "1");
     cmd
+}
+
+/// The tests share one desktop: their overlays, recordings and pointer moves would get in each
+/// other's way (and slow each other past their waits), so they take turns.
+fn desktop() -> std::sync::MutexGuard<'static, ()> {
+    static DESKTOP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    DESKTOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn mean_brightness(path: &Path) -> f64 {
@@ -46,6 +56,7 @@ fn saved_path(out: &std::process::Output) -> std::path::PathBuf {
 #[test]
 #[ignore = "needs a graphical session; briefly shows the overlay"]
 fn overlay_capture_does_not_contain_the_overlay() {
+    let _desktop = desktop();
     let dir = tempfile::tempdir().unwrap();
     let geometry = "40,40 400x300";
     let headless = saved_path(
@@ -76,6 +87,7 @@ fn overlay_capture_does_not_contain_the_overlay() {
 #[test]
 #[ignore = "needs a graphical session; briefly shows the overlay"]
 fn drawings_are_saved_in_the_capture() {
+    let _desktop = desktop();
     let dir = tempfile::tempdir().unwrap();
     let path = saved_path(
         &bin()
@@ -101,6 +113,7 @@ const fn screencapture_first_colour() -> [u8; 4] {
 #[test]
 #[ignore = "needs a graphical session; briefly shows the overlay"]
 fn redaction_and_text_are_saved() {
+    let _desktop = desktop();
     let dir = tempfile::tempdir().unwrap();
     let path = saved_path(
         &bin()
@@ -159,6 +172,44 @@ impl Session {
         }
     }
 
+    /// Whether this session's recording process is up within 20 s: from then on, it answers
+    /// `record stop`.
+    fn recording_soon(&self) -> bool {
+        let socket = self.runtime.join("screencapture.sock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !socket.exists() {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        true
+    }
+
+    /// Let `recording` record for 1.5 s once it is up (the recorder itself takes a moment to
+    /// start), then stop it: what `record stop` and
+    /// the recording printed. Kills it, and fails the test, if it never starts or won't stop.
+    fn stop_once_recorded(&self, mut recording: std::process::Child) -> (Output, Output) {
+        let started = self.recording_soon();
+        if started {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        let stopped = self.command().args(["record", "stop"]).output();
+        let stopped = stopped.expect("the binary under test runs");
+        if !(started && stopped.status.success()) {
+            let _ = recording.kill();
+        }
+        let out = recording.wait_with_output();
+        let out = out.expect("the recording process can be waited on");
+        assert!(
+            stopped.status.success(),
+            "stop failed: {}; the recording said: {}",
+            String::from_utf8_lossy(&stopped.stderr),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (stopped, out)
+    }
+
     /// The binary, in this session.
     fn command(&self) -> Command {
         let mut cmd = bin();
@@ -179,6 +230,11 @@ const GEOMETRY: &str = "200,200 640x360";
 /// Open the overlay standalone, let the test hook select `GEOMETRY` (with a line across its
 /// middle) and record it, then stop: the video's path.
 fn record_from_overlay() -> std::path::PathBuf {
+    saved_path(&overlay_recording(&[]))
+}
+
+/// Like `record_from_overlay`, with the test hook also told `hooks`: what the overlay printed.
+fn overlay_recording(hooks: &[(&str, &str)]) -> std::process::Output {
     let session = Session::new();
     let overlay = session
         .command()
@@ -188,25 +244,23 @@ fn record_from_overlay() -> std::path::PathBuf {
             ("SCREENCAPTURE_E2E_LINE", "1"),
             ("SCREENCAPTURE_E2E_RECORD", "1"),
         ])
+        .envs(hooks.iter().copied())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the binary under test runs");
-    std::thread::sleep(std::time::Duration::from_millis(2500));
-    let stopped = session
-        .command()
-        .args(["record", "stop"])
-        .status()
-        .expect("the binary under test runs");
-    let out = overlay
-        .wait_with_output()
-        .expect("the overlay process can be waited on");
-    assert!(
-        stopped.success(),
-        "stop failed; overlay said: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    saved_path(&out)
+    session.stop_once_recorded(overlay).1
+}
+
+#[test]
+#[ignore = "needs a graphical session and gpu-screen-recorder; shows the overlay, then records"]
+fn capturing_while_the_bars_slide_away_is_ignored() {
+    let _desktop = desktop();
+    let out = overlay_recording(&[("SCREENCAPTURE_E2E_CAPTURE_TOO", "1")]);
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let saved: Vec<&Path> = printed.lines().map(Path::new).collect();
+    let only_a_video = matches!(saved.as_slice(), [video] if video.extension() == Some("mp4".as_ref()));
+    assert!(only_a_video, "printed: {printed}");
 }
 
 /// A frame from the end of `video`, as an image.
@@ -226,6 +280,7 @@ fn last_frame(video: &Path) -> image::RgbaImage {
 #[test]
 #[ignore = "needs a graphical session and gpu-screen-recorder; shows the overlay, then records"]
 fn recording_from_the_overlay_records_the_region() {
+    let _desktop = desktop();
     let frame = last_frame(&record_from_overlay());
     assert_eq!(frame.dimensions(), (640, 360));
 }
@@ -233,6 +288,7 @@ fn recording_from_the_overlay_records_the_region() {
 #[test]
 #[ignore = "needs a graphical session and gpu-screen-recorder; shows the overlay, then records"]
 fn the_frozen_overlay_is_not_in_the_recording() {
+    let _desktop = desktop();
     let dir = tempfile::tempdir().expect("the system has a temporary folder");
     let screenshot = bin()
         .args(["region", "-g", GEOMETRY, "-o"])
@@ -259,6 +315,7 @@ fn near(pixel: image::Rgba<u8>, colour: [u8; 4], tolerance: u8) -> bool {
 #[test]
 #[ignore = "needs a graphical session and gpu-screen-recorder; shows the overlay, then records"]
 fn drawings_made_before_recording_are_recorded() {
+    let _desktop = desktop();
     let frame = last_frame(&record_from_overlay());
     let line_rows = 178..183;
     let on_line = |x| {
@@ -281,6 +338,7 @@ fn widest_screen() -> u32 {
 #[test]
 #[ignore = "needs a graphical session with two screens or more, and gpu-screen-recorder; records every screen"]
 fn recording_every_screen_makes_one_video_wider_than_any_screen() {
+    let _desktop = desktop();
     let session = Session::new();
     let recording = session
         .command()
@@ -289,14 +347,8 @@ fn recording_every_screen_makes_one_video_wider_than_any_screen() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the binary under test runs");
-    std::thread::sleep(std::time::Duration::from_millis(2500));
-    let stopped = session
-        .command()
-        .args(["record", "stop"])
-        .output()
-        .expect("the binary under test runs");
+    let (stopped, _) = session.stop_once_recorded(recording);
     let video = saved_path(&stopped);
-    let _ = recording.wait_with_output();
     assert!(last_frame(&video).width() > widest_screen());
 }
 
@@ -348,6 +400,8 @@ mod drawer {
             .args(["record", "screen", &screen.name])
             .spawn()
             .expect("the binary under test runs");
+        assert!(session.recording_soon(), "the recording did not start");
+        // Then the strips open.
         std::thread::sleep(std::time::Duration::from_millis(1500));
         let centre = screen.x + screen.width / 2;
         let mut pointer = Pointer::new(layout());
@@ -388,6 +442,7 @@ mod drawer {
     #[test]
     #[ignore = "needs a wlroots session and gpu-screen-recorder; moves the pointer and records"]
     fn the_drawer_stops_the_recording() {
+        let _desktop = desktop();
         let session = Session::new();
         let mut recording = click_in_drawer(&session, STOP_BUTTON);
         assert!(ends_soon(&mut recording), "the recording went on");
@@ -396,6 +451,7 @@ mod drawer {
     #[test]
     #[ignore = "needs a wlroots session and gpu-screen-recorder; moves the pointer and records"]
     fn the_drawer_discards_the_recording() {
+        let _desktop = desktop();
         let session = Session::new();
         let mut recording = click_in_drawer(&session, DISCARD_BUTTON);
         let _ = ends_soon(&mut recording);

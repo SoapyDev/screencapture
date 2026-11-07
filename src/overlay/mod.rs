@@ -454,6 +454,8 @@ fn start(
         let extras = std::env::var_os("SCREENCAPTURE_E2E_EXTRAS").is_some();
         // Record the region instead of capturing it.
         let record = std::env::var_os("SCREENCAPTURE_E2E_RECORD").is_some();
+        // Then click Capture at once, while the bars slide away.
+        let capture_too = std::env::var_os("SCREENCAPTURE_E2E_CAPTURE_TOO").is_some();
         cx.spawn(async move |cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
@@ -480,6 +482,9 @@ fn start(
                 }
                 if record {
                     o.record_target(crate::record::plan::Target::Region(rect), cx);
+                    if capture_too {
+                        o.finish(Some(Request::Region(rect)), cx);
+                    }
                 } else {
                     o.finish(Some(Request::Region(rect)), cx);
                 }
@@ -623,6 +628,10 @@ impl Overlay {
     }
 
     fn finish(&mut self, request: Option<Request>, cx: &mut Context<Self>) {
+        // E.g. Capture clicked while the bars slide away for a recording.
+        if !self.selecting() {
+            return;
+        }
         let Some(request) = request else {
             cx.notify();
             return;
@@ -884,6 +893,9 @@ impl Overlay {
 
     /// Let the user pick `folder` in a file dialog (the overlay steps aside meanwhile).
     fn browse(&mut self, folder: Folder, cx: &mut Context<Self>) {
+        if !self.selecting() {
+            return;
+        }
         self.phase = Phase::Browsing;
         let entity = cx.entity();
         let prompt = folder.prompt(&self.config);
@@ -1089,11 +1101,7 @@ impl View {
     }
 
     fn toolbar(&self, bar: &Bar) -> impl IntoElement {
-        let overlay = self.overlay.clone();
-        let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| {
-            let overlay = overlay.clone();
-            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| overlay.update(cx, f)
-        };
+        let act = |f: fn(&mut Overlay, &mut Context<Overlay>)| tools::on(&self.overlay, f);
         let main = panel()
             .child(
                 tools::button("region", "Region  R", bar.mode == Mode::Region)

@@ -183,6 +183,10 @@ impl Overlay {
     }
 
     fn launch_recording(&mut self, target: Target, cx: &mut Context<Self>) {
+        // Something else ended the overlay while the bars slid away.
+        if !matches!(self.phase, Phase::Leaving) {
+            return;
+        }
         let command = Command::Start(target, Overrides::from(self.config.record));
         let drawings = self.annotations.shapes().cloned().collect();
         self.phase = Phase::Done;

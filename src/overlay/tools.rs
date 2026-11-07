@@ -94,7 +94,14 @@ pub(super) fn on(
     f: impl Fn(&mut Overlay, &mut gpui::Context<Overlay>) + 'static,
 ) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
     let overlay = overlay.clone();
-    move |_, _, cx| overlay.update(cx, |o, cx| f(o, cx))
+    // Buttons stay drawn while the bars slide away, but they no longer act.
+    move |_, _, cx| {
+        overlay.update(cx, |o, cx| {
+            if o.selecting() {
+                f(o, cx);
+            }
+        });
+    }
 }
 
 fn swatch(id: String, c: Color, selected: bool) -> Stateful<Div> {
