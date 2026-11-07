@@ -108,11 +108,17 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// Replace the file at `path` whole: written beside it, then renamed over it, so a reader
+    /// (or a crash) never finds it half-written.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, serde_json::to_vec_pretty(self)?)?;
+        let written = beside(path);
+        std::fs::write(&written, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(&written, path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&written);
+        })?;
         Ok(())
     }
 
@@ -182,6 +188,15 @@ pub fn default_output_dir() -> PathBuf {
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Screenshots")
+}
+
+/// A new file name next to `path`, for one save: saves at the same time never share one.
+fn beside(path: &Path) -> PathBuf {
+    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let save = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{save}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -304,6 +319,41 @@ mod tests {
         };
         config.save_to(&path).unwrap();
         assert_eq!(Config::load_from(&path), config);
+    }
+
+    /// Saves of `config` to `path`, many times over, on another thread.
+    fn saving_over_and_over(config: Config, path: PathBuf) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            for _ in 0..500 {
+                config.save_to(&path).expect("the folder is writable");
+            }
+        })
+    }
+
+    #[test]
+    fn a_config_being_saved_is_never_read_half_written() {
+        let dir = tempfile::tempdir().expect("the system has a temporary folder");
+        let path = dir.path().join("config.json");
+        let config = Config {
+            output_dir: Some("/shots".into()),
+            ..Config::default()
+        };
+        config.save_to(&path).expect("the folder is writable");
+        let saving = saving_over_and_over(config.clone(), path.clone());
+        let mut broken = 0;
+        while !saving.is_finished() {
+            broken += usize::from(Config::load_from(&path) != config);
+        }
+        assert_eq!(broken, 0, "reads that found no config");
+    }
+
+    #[test]
+    fn saving_a_config_leaves_only_the_config() {
+        let dir = tempfile::tempdir().expect("the system has a temporary folder");
+        let path = dir.path().join("config.json");
+        Config::default().save_to(&path).expect("the folder is writable");
+        let files = std::fs::read_dir(dir.path()).expect("the folder exists").count();
+        assert_eq!(files, 1);
     }
 
     #[test]

@@ -869,14 +869,16 @@ impl Overlay {
     fn pick_custom(&mut self, color: Color, cx: &mut Context<Self>) {
         self.picker = None;
         self.config.custom_color = Some(annotate::to_hex(color));
-        let config = self.config.clone();
-        cx.background_spawn(async move {
-            if let Err(e) = config.save() {
-                eprintln!("screencapture: could not remember colour: {e:#}");
-            }
-        })
-        .detach();
+        self.remember("the colour");
         self.set_color(color, cx);
+    }
+
+    /// Save the config now (~20 µs, so saves land in the order the user made them); `what`
+    /// changed, for the error.
+    fn remember(&self, what: &str) {
+        if let Err(e) = self.config.save() {
+            eprintln!("screencapture: could not remember {what}: {e:#}");
+        }
     }
 
     fn step_width(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -940,9 +942,7 @@ impl Overlay {
         self.phase = Phase::Selecting;
         let Some(dir) = dir else { return };
         folder.choose(&mut self.config, dir);
-        if let Err(e) = self.config.save() {
-            eprintln!("could not remember folder: {e:#}");
-        }
+        self.remember("the folder");
     }
 
     fn pointer(&self) -> Option<annotate::Point> {

@@ -208,13 +208,7 @@ impl Overlay {
     ) {
         let value = field(&mut self.config.record);
         *value = value.next();
-        let config = self.config.clone();
-        cx.background_spawn(async move {
-            if let Err(e) = config.save() {
-                eprintln!("screencapture: could not remember the recording settings: {e:#}");
-            }
-        })
-        .detach();
+        self.remember("the recording settings");
         cx.notify();
     }
 }
