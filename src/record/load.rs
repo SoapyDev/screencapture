@@ -12,7 +12,11 @@ pub struct CpuTimes {
 /// The aggregate `cpu` line of `/proc/stat`.
 pub fn parse_proc_stat(text: &str) -> Option<CpuTimes> {
     let line = text.lines().find(|l| l.starts_with("cpu "))?;
-    let ticks: Vec<u64> = line.split_whitespace().skip(1).map_while(|t| t.parse().ok()).collect();
+    let ticks: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .map_while(|t| t.parse().ok())
+        .collect();
     // user nice system idle iowait irq softirq steal; guest time is already inside user.
     let total: u64 = ticks.iter().take(8).sum();
     let idle = ticks.get(3)? + ticks.get(4).unwrap_or(&0);
@@ -97,8 +101,14 @@ mod tests {
 
     #[test]
     fn load_between_two_readings() {
-        let a = CpuTimes { busy: 100, total: 1000 };
-        let b = CpuTimes { busy: 175, total: 1100 };
+        let a = CpuTimes {
+            busy: 100,
+            total: 1000,
+        };
+        let b = CpuTimes {
+            busy: 175,
+            total: 1100,
+        };
         assert_eq!(cpu_load(a, b), Some(0.75));
         assert_eq!(cpu_load(a, a), None, "no time passed");
     }

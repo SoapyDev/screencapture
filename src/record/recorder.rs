@@ -25,7 +25,9 @@ fn which(program: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|dir| dir.join(program))
-        .find(|path| std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+        .find(|path| {
+            std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// gpu-screen-recorder if installed, else wf-recorder. `SCREENCAPTURE_RECORDER=wf-recorder`
@@ -72,7 +74,12 @@ pub struct Active {
 
 impl Active {
     /// Record `job` into a new file in `dir`.
-    pub fn start(backend: &Backend, job: Job, dir: &Path, time: chrono::DateTime<chrono::Local>) -> Result<Self> {
+    pub fn start(
+        backend: &Backend,
+        job: Job,
+        dir: &Path,
+        time: chrono::DateTime<chrono::Local>,
+    ) -> Result<Self> {
         let ext = if job.gif { "gif" } else { "mp4" };
         // Reserved now, so no other file can take the name; the recorder writes over it.
         let (path, _) = crate::save::reserve(dir, "screencast", ext, time)?;
@@ -99,7 +106,13 @@ impl Active {
                     video,
                     leftovers: Vec::new(),
                 };
-                Self::spawn(program, &args, &Ready::After(Duration::from_millis(500)), files, job)
+                Self::spawn(
+                    program,
+                    &args,
+                    &Ready::After(Duration::from_millis(500)),
+                    files,
+                    job,
+                )
             }
         }
     }
@@ -162,7 +175,10 @@ impl Active {
                 Ready::File(file) if file.exists() => break,
                 Ready::After(wait) if begun.elapsed() >= *wait => break,
                 Ready::File(_) if begun.elapsed() >= START_TIMEOUT => {
-                    let message = format!("the recorder didn't start within {START_TIMEOUT:?}{}", active.log_tail());
+                    let message = format!(
+                        "the recorder didn't start within {START_TIMEOUT:?}{}",
+                        active.log_tail()
+                    );
                     active.cancel();
                     bail!(message);
                 }
@@ -282,7 +298,12 @@ pub fn spawn_fake(dir: &Path, script: &str, job: Job) -> Result<Active> {
         video: path.clone(),
         leftovers: vec![stamp.clone()],
     };
-    let args = ["-c".into(), script.into(), "fake".into(), path.display().to_string()];
+    let args = [
+        "-c".into(),
+        script.into(),
+        "fake".into(),
+        path.display().to_string(),
+    ];
     Active::spawn(Path::new("/bin/sh"), &args, &Ready::File(stamp), files, job)
 }
 
@@ -295,7 +316,10 @@ struct Files {
 
 impl Files {
     fn remove(&self) {
-        for file in std::iter::once(&self.path).chain([&self.video]).chain(&self.leftovers) {
+        for file in std::iter::once(&self.path)
+            .chain([&self.video])
+            .chain(&self.leftovers)
+        {
             let _ = std::fs::remove_file(file);
         }
     }
@@ -340,7 +364,12 @@ mod tests {
             video: path.clone(),
             leftovers: vec![ts],
         };
-        let args = vec!["-c".into(), script.into(), "fake".into(), path.display().to_string()];
+        let args = vec![
+            "-c".into(),
+            script.into(),
+            "fake".into(),
+            path.display().to_string(),
+        ];
         Active::spawn(Path::new("/bin/sh"), &args, &ready, files, job(gif))
     }
 
@@ -357,17 +386,29 @@ mod tests {
         assert!(active.alive());
         let path = active.stop().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "start\nend\n");
-        assert!(!dir.path().join("clip.mp4.ts").exists(), "timestamp file cleaned up");
+        assert!(
+            !dir.path().join("clip.mp4.ts").exists(),
+            "timestamp file cleaned up"
+        );
     }
 
     #[test]
     fn a_recorder_that_dies_at_start_is_an_error_with_its_output() {
         let dir = tempfile::tempdir().unwrap();
-        let err = fake(dir.path(), "echo 'gsr error: no such monitor' >&2; exit 1", Ready::File(PathBuf::new()), false)
-            .err()
-            .unwrap();
+        let err = fake(
+            dir.path(),
+            "echo 'gsr error: no such monitor' >&2; exit 1",
+            Ready::File(PathBuf::new()),
+            false,
+        )
+        .err()
+        .unwrap();
         assert!(format!("{err:#}").contains("no such monitor"), "{err:#}");
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing left behind");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "nothing left behind"
+        );
     }
 
     #[test]
@@ -375,20 +416,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let active = fake(dir.path(), FAKE, Ready::After(Duration::from_millis(50)), false).unwrap();
         assert!(active.stop().is_ok());
-        assert!(fake(dir.path(), "exit 3", Ready::After(Duration::from_millis(200)), false).is_err());
+        assert!(
+            fake(
+                dir.path(),
+                "exit 3",
+                Ready::After(Duration::from_millis(200)),
+                false
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn cancelling_leaves_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        fake(dir.path(), FAKE, Ready::File(PathBuf::new()), false).unwrap().cancel();
+        fake(dir.path(), FAKE, Ready::File(PathBuf::new()), false)
+            .unwrap()
+            .cancel();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
     fn a_recorder_that_wrote_nothing_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let script = r#"out="$1"; trap 'rm -f "$out"; exit 0' INT; : > "$out.ts"; while :; do sleep 0.01; done"#;
+        let script =
+            r#"out="$1"; trap 'rm -f "$out"; exit 0' INT; : > "$out.ts"; while :; do sleep 0.01; done"#;
         let active = fake(dir.path(), script, Ready::File(PathBuf::new()), false).unwrap();
         assert!(active.stop().is_err());
     }
@@ -412,7 +464,12 @@ mod tests {
         let path = active.stop().unwrap();
         let probe = Command::new("ffprobe")
             .args(["-v", "error", "-select_streams", "v:0", "-count_frames"])
-            .args(["-show_entries", "stream=codec_name,width,height,nb_read_frames", "-of", "csv=p=0"])
+            .args([
+                "-show_entries",
+                "stream=codec_name,width,height,nb_read_frames",
+                "-of",
+                "csv=p=0",
+            ])
             .arg(&path)
             .output()
             .unwrap();
@@ -421,7 +478,11 @@ mod tests {
         assert_eq!(&fields[..3], ["av1", "640", "360"], "{text}");
         let frames: u32 = fields[3].parse().unwrap();
         assert!(frames >= 10, "{frames} frames");
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the video");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "only the video"
+        );
     }
 
     #[test]
@@ -439,6 +500,10 @@ mod tests {
         let path = active.stop().unwrap();
         assert_eq!(path.extension().unwrap(), "gif");
         assert!(std::fs::read(&path).unwrap().starts_with(b"GIF89a"));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "temporary video removed");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "temporary video removed"
+        );
     }
 }

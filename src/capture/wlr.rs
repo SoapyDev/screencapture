@@ -446,6 +446,22 @@ fn wait_for_frames(queue: &mut EventQueue<State>, state: &mut State) -> Result<(
     }
 }
 
+/// A fresh `size`-byte memory file, mapped for reading: the compositor gets the file and copies
+/// a screen into it, we read the pixels through the map.
+fn shared_memory(size: usize) -> Result<(OwnedFd, Mmap)> {
+    use rustix::fs::{MemfdFlags, SealFlags};
+    anyhow::ensure!(size > 0, "no memory to share for an empty screen");
+    let fd = rustix::fs::memfd_create(c"screencapture", MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING)?;
+    rustix::fs::ftruncate(&fd, size as u64)?;
+    rustix::fs::fcntl_add_seals(&fd, SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL)?;
+    // SAFETY: a mapped file changing under us is the danger. This one is a fresh memfd only we
+    // and the compositor hold (close-on-exec: no child gets it), sealed so it can't shrink
+    // (which would fault reads). The compositor only writes into it before sending `ready`,
+    // and we only read it after; tests check the size, sealing and close-on-exec.
+    let map = unsafe { MmapOptions::new().len(size).map(&fd)? };
+    Ok((fd, map))
+}
+
 /// Allocate shared memory for the best offered format and ask the compositor to copy into it.
 fn start_copy(state: &mut State, index: usize, frame: &ZwlrScreencopyFrameV1, qh: &QueueHandle<State>) {
     let result = (|| -> Result<Memory> {
@@ -464,11 +480,7 @@ fn start_copy(state: &mut State, index: usize, frame: &ZwlrScreencopyFrameV1, qh
             None => {}
         }
         let size = spec.stride as usize * spec.height as usize;
-        let fd: OwnedFd = rustix::fs::memfd_create(c"screencapture", rustix::fs::MemfdFlags::CLOEXEC)?;
-        rustix::fs::ftruncate(&fd, size as u64)?;
-        // SAFETY: the memfd is private to us and the compositor, which only writes into it
-        // before sending `ready`; we read it after that.
-        let map = unsafe { MmapOptions::new().len(size).map(&fd)? };
+        let (fd, map) = shared_memory(size)?;
         let shm = state.shm.as_ref().context("wl_shm not bound")?;
         let pool: WlShmPool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
         let buffer = pool.create_buffer(
@@ -657,6 +669,53 @@ wayland_client::delegate_noop!(State: ZwlrScreencopyManagerV1);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_memory_is_the_size_asked() {
+        let (_, map) = shared_memory(4096 * 3).unwrap();
+        assert_eq!(map.len(), 4096 * 3);
+    }
+
+    #[test]
+    fn shared_memory_starts_zeroed() {
+        let (_, map) = shared_memory(4096).unwrap();
+        assert!(map.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn writes_through_the_file_show_in_the_map() {
+        // What the compositor does: write into the file it was handed, then we read the map.
+        let (fd, map) = shared_memory(4096).unwrap();
+        rustix::io::pwrite(&fd, b"pixels", 100).unwrap();
+        assert_eq!(&map[100..106], b"pixels");
+    }
+
+    #[test]
+    fn empty_shared_memory_is_refused() {
+        assert!(shared_memory(0).is_err());
+    }
+
+    #[test]
+    fn shared_memory_is_not_inherited_by_child_processes() {
+        // Recorders and helpers we start must never get a handle that could change the pixels.
+        let (fd, _) = shared_memory(4096).unwrap();
+        let flags = rustix::io::fcntl_getfd(&fd).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    }
+
+    #[test]
+    fn shared_memory_cannot_shrink_under_the_map() {
+        // Reads past a shrunk file's end would fault (SIGBUS): sealed against it.
+        let (fd, _map) = shared_memory(8192).unwrap();
+        assert!(rustix::fs::ftruncate(&fd, 4096).is_err());
+    }
+
+    #[test]
+    fn shared_memory_cannot_grow_either() {
+        // The compositor and we agree on one size for the buffer's whole life.
+        let (fd, _map) = shared_memory(8192).unwrap();
+        assert!(rustix::fs::ftruncate(&fd, 16384).is_err());
+    }
 
     fn shot(name: &str) -> Shot {
         Shot {

@@ -3,6 +3,8 @@
 pub mod command;
 #[cfg(target_os = "linux")]
 pub mod foreground;
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub mod frame;
 #[cfg(target_os = "linux")]
 pub mod load;
 pub mod plan;

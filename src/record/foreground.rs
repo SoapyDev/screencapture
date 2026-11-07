@@ -5,29 +5,23 @@
 use std::{
     os::unix::net::UnixListener,
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use super::{Env, Outcome, Recorder, command::Command};
 use crate::daemon::{self, Reply, Request};
 
-/// Set by Ctrl+C, SIGTERM or SIGHUP.
-static STOP: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn on_signal(_: libc::c_int) {
-    STOP.store(true, Ordering::Relaxed);
-}
+/// The recorded area and the screens, while recording; `None` once it ended.
+pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<(crate::capture::Rect, Vec<crate::capture::MonitorInfo>)>);
 
 /// Record `command` (a start), in this process, until told to stop. Prints how to stop it.
-pub fn run(command: Command, socket: &Path) -> anyhow::Result<Outcome> {
+pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Result<Outcome> {
     let listener = daemon::bind(socket)?;
-    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
-    unsafe {
-        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            libc::signal(signal, on_signal as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t);
-        }
-    }
+    let stop = stop_on_signals()?;
     let mut recorder = Recorder::default();
     let outcome = match recorder.run(command, &mut super::LiveEnv) {
         Outcome::Started { path, notes } => {
@@ -38,12 +32,25 @@ pub fn run(command: Command, socket: &Path) -> anyhow::Result<Outcome> {
                 "screencapture: recording to {} (Ctrl+C or `screencapture record stop` ends it)",
                 path.display()
             );
-            serve(&listener, &mut recorder, &mut super::LiveEnv, &STOP)
+            show_frame(recorder.frame());
+            let ended = serve(&listener, &mut recorder, &mut super::LiveEnv, &stop);
+            show_frame(None);
+            ended
         }
         other => other,
     };
     let _ = std::fs::remove_file(socket);
     Ok(outcome)
+}
+
+/// A flag that Ctrl+C, SIGTERM and SIGHUP raise (instead of killing the process).
+fn stop_on_signals() -> std::io::Result<Arc<AtomicBool>> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    let stop = Arc::new(AtomicBool::new(false));
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        signal_hook::flag::register(signal, stop.clone())?;
+    }
+    Ok(stop)
 }
 
 /// Answer clients while the recording runs; returns how it ended.
@@ -84,9 +91,14 @@ fn serve(listener: &UnixListener, recorder: &mut Recorder, env: &mut impl Env, s
 mod tests {
     use super::*;
     use crate::record::{control::testing::Fake, plan::Target, settings::Overrides};
-    use std::sync::Arc;
 
-    fn recording() -> (tempfile::TempDir, std::path::PathBuf, UnixListener, Recorder, Fake) {
+    fn recording() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        UnixListener,
+        Recorder,
+        Fake,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("run").join("d.sock");
         let listener = daemon::bind(&socket).unwrap();
@@ -102,18 +114,38 @@ mod tests {
         let (_dir, socket, listener, mut recorder, mut env) = recording();
         let path = recorder.recording().unwrap();
         let client = std::thread::spawn(move || {
-            let print = daemon::request(&socket, crate::selection::Mode::Region).unwrap().unwrap();
-            let start = daemon::send(&socket, &Request::Record(Command::Start(Target::All, Overrides::default())));
-            let stop = daemon::send(&socket, &Request::Record(Command::Stop)).unwrap().unwrap();
+            let print = daemon::request(&socket, crate::selection::Mode::Region)
+                .unwrap()
+                .unwrap();
+            let start = daemon::send(
+                &socket,
+                &Request::Record(Command::Start(Target::All, Overrides::default())),
+            );
+            let stop = daemon::send(&socket, &Request::Record(Command::Stop))
+                .unwrap()
+                .unwrap();
             (print, start.unwrap().unwrap().reply, stop.reply)
         });
         let outcome = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
         let (print, start, stop) = client.join().unwrap();
-        assert_eq!(print, Reply::Recording(path.clone()), "Print is told a recording runs");
+        assert_eq!(
+            print,
+            Reply::Recording(path.clone()),
+            "Print is told a recording runs"
+        );
         assert_eq!(start, Reply::Busy);
         assert_eq!(stop, Reply::Saved(path.clone()));
         assert_eq!(outcome, Outcome::Saved(path.clone()));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn stop_signals_raise_the_stop_flag() {
+        let stop = stop_on_signals().unwrap();
+        assert!(!stop.load(Ordering::Relaxed));
+        // SIGHUP: SIGINT would also reach a terminal's test runner if this went wrong.
+        signal_hook::low_level::raise(signal_hook::consts::SIGHUP).unwrap();
+        assert!(stop.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -125,7 +157,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             flag.store(true, Ordering::Relaxed);
         });
-        assert!(matches!(serve(&listener, &mut recorder, &mut env, &stop), Outcome::Saved(_)));
+        assert!(matches!(
+            serve(&listener, &mut recorder, &mut env, &stop),
+            Outcome::Saved(_)
+        ));
     }
 
     #[test]

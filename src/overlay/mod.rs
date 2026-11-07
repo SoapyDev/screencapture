@@ -13,6 +13,7 @@
 mod gate;
 mod keys;
 pub mod layout;
+mod recording;
 mod tools;
 
 use std::{
@@ -172,6 +173,69 @@ pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, 
 }
 
 /// Resident mode: initialise the GPU once, then open an overlay per client request.
+/// Run `work` on its own thread while gpui shows the recording frame it asks for, then quit.
+/// For recording without the daemon.
+#[cfg(target_os = "linux")]
+pub fn with_recording_frame<R: Send + 'static>(
+    work: impl FnOnce(crate::record::foreground::ShowFrame) -> R + Send + 'static,
+) -> R {
+    use futures::StreamExt;
+    let result = Arc::new(std::sync::Mutex::new(None));
+    let slot = result.clone();
+    gpui_platform::application().run(move |cx: &mut App| {
+        cx.set_quit_mode(QuitMode::Explicit);
+        // `Some(spec)`: show (or take down) a frame; `None`: the work is done.
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Option<recording::Spec>>>();
+        std::thread::spawn(move || {
+            let done = work(&mut |frame| {
+                let spec = frame.map(|(area, monitors)| recording::Spec {
+                    area,
+                    monitors,
+                    shapes: Vec::new(),
+                });
+                let _ = tx.unbounded_send(Some(spec));
+            });
+            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(done);
+            let _ = tx.unbounded_send(None);
+        });
+        cx.spawn(async move |cx| {
+            let mut shown: Option<recording::Shown> = None;
+            while let Some(Some(spec)) = rx.next().await {
+                cx.update(|cx| {
+                    if let Some(old) = shown.take() {
+                        recording::hide(old, cx);
+                    }
+                    shown = spec.map(|spec| recording::show(&spec, cx));
+                });
+            }
+            cx.update(|cx| {
+                if let Some(old) = shown.take() {
+                    recording::hide(old, cx);
+                }
+                cx.quit();
+            });
+        })
+        .detach();
+    });
+    let done = result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    done.expect("the recording thread finished before gpui quit")
+}
+
+/// Work the daemon's request thread hands to the UI thread.
+#[cfg(unix)]
+enum ToUi {
+    Overlay(daemon::Pending, anyhow::Result<Frozen>, Config),
+    /// Show this recording frame, replacing any other; `None` removes it.
+    Frame(Option<recording::Spec>),
+}
+
+/// How often the daemon checks on a running recorder (it may quit by itself).
+#[cfg(target_os = "linux")]
+const WATCH_RECORDER: std::time::Duration = std::time::Duration::from_millis(250);
+
 #[cfg(unix)]
 pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
     use futures::StreamExt;
@@ -204,19 +268,48 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                 .map_or(RELEASE_BUFFERS_AFTER, std::time::Duration::from_secs);
             // Recordings run beside the overlay's machinery, on this thread.
             #[cfg(target_os = "linux")]
-            let mut recorder = crate::record::Recorder::default();
-            daemon::serve(&listener, Some(release_after), quiet, |mut pending| {
+            let recorder = std::cell::RefCell::new(crate::record::Recorder::default());
+            #[cfg(target_os = "linux")]
+            let send_frame = |recorder: &crate::record::Recorder| {
+                let spec = recorder.frame().map(|(area, monitors)| recording::Spec {
+                    area,
+                    monitors,
+                    shapes: Vec::new(),
+                });
+                let _ = tx.unbounded_send(ToUi::Frame(spec));
+            };
+            // While recording: notice a recorder that quit by itself, and take its frame down.
+            #[cfg(target_os = "linux")]
+            let watch = || {
+                let mut recorder = recorder.borrow_mut();
+                recorder.recording()?;
+                if let Some(outcome) = recorder.ended_by_itself() {
+                    eprintln!("screencapture: the recorder stopped by itself: {outcome:?}");
+                    send_frame(&recorder);
+                    return None;
+                }
+                Some(WATCH_RECORDER)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let watch = || None;
+            daemon::serve(&listener, Some(release_after), quiet, watch, |mut pending| {
                 crate::trace_restart();
                 trace("request received");
                 #[cfg(target_os = "linux")]
                 {
+                    let mut recorder = recorder.borrow_mut();
                     if let daemon::Request::Record(command) = pending.request.clone() {
                         // Never record the frozen overlay.
                         if command.starts() && recorder.recording().is_none() && GATE.is_open() {
                             pending.reply(&daemon::Reply::Busy);
                             return;
                         }
-                        let (reply, notes) = recorder.run(command, &mut crate::record::LiveEnv).reply();
+                        let before = recorder.frame().map(|(area, _)| area);
+                        let outcome = recorder.run(command, &mut crate::record::LiveEnv);
+                        if recorder.frame().map(|(area, _)| area) != before {
+                            send_frame(&recorder);
+                        }
+                        let (reply, notes) = outcome.reply();
                         for note in &notes {
                             pending.note(note);
                         }
@@ -249,12 +342,23 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                 }
                 let frozen = session.borrow_mut().take().map(Frozen::new);
                 trace("screens frozen");
-                let _ = tx.unbounded_send((pending, frozen, Config::load()));
+                let _ = tx.unbounded_send(ToUi::Overlay(pending, frozen, Config::load()));
             });
         });
         cx.spawn(async move |cx| {
-            while let Some((pending, frozen, config)) = rx.next().await {
-                cx.update(|cx| serve_request(pending, frozen, config, cx));
+            let mut shown: Option<recording::Shown> = None;
+            while let Some(work) = rx.next().await {
+                match work {
+                    ToUi::Overlay(pending, frozen, config) => {
+                        cx.update(|cx| serve_request(pending, frozen, config, cx));
+                    }
+                    ToUi::Frame(spec) => cx.update(|cx| {
+                        if let Some(old) = shown.take() {
+                            recording::hide(old, cx);
+                        }
+                        shown = spec.map(|spec| recording::show(&spec, cx));
+                    }),
+                }
             }
         })
         .detach();

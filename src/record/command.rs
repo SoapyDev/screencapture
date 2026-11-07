@@ -43,7 +43,12 @@ impl Command {
             "all" => Target::All,
             "screens" => Target::Screens(words.next()?.split(',').map(String::from).collect()),
             "region" => {
-                let n: Vec<i32> = words.next()?.split(',').map(str::parse).collect::<Result<_, _>>().ok()?;
+                let n: Vec<i32> = words
+                    .next()?
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .ok()?;
                 let [x, y, w, h] = n[..] else { return None };
                 let rect = Rect::new(x, y, w, h);
                 if rect.is_empty() {
@@ -85,7 +90,10 @@ mod tests {
         for command in [
             Command::Start(Target::Focused, Overrides::default()),
             Command::Start(Target::All, fast),
-            Command::Start(Target::Screens(vec!["DP-1".into(), "HDMI-A-1".into()]), Overrides::default()),
+            Command::Start(
+                Target::Screens(vec!["DP-1".into(), "HDMI-A-1".into()]),
+                Overrides::default(),
+            ),
             Command::Start(Target::Region(Rect::new(-10, 20, 300, 400)), fast),
             Command::Stop,
             Command::Toggle(Target::Focused, fast),
@@ -98,7 +106,15 @@ mod tests {
 
     #[test]
     fn nonsense_is_rejected() {
-        for line in ["", "begin", "start", "start moon", "start region 1,2,3", "start all fps=7", "stop now"] {
+        for line in [
+            "",
+            "begin",
+            "start",
+            "start moon",
+            "start region 1,2,3",
+            "start all fps=7",
+            "stop now",
+        ] {
             assert_eq!(Command::parse(line), None, "{line:?}");
         }
     }

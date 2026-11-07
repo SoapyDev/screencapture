@@ -47,7 +47,9 @@ pub fn trace_restart() {
 
 fn main() -> ExitCode {
     trace_restart();
-    memory::tune();
+    if let Err(e) = memory::tune() {
+        eprintln!("screencapture: memory tuning: {e:#}");
+    }
     let cli = Cli::parse();
     let plan = cli.plan();
     let mut config = Config::load();
@@ -145,10 +147,13 @@ fn record(command: record::command::Command) -> ExitCode {
                 reply: daemon::Reply::NotRecording,
                 notes: Vec::new(),
             }),
-            None => record::foreground::run(command, &socket).map(|outcome| {
-                let (reply, notes) = outcome.reply();
-                daemon::Answer { reply, notes }
-            }),
+            None => {
+                overlay::with_recording_frame(move |show| record::foreground::run(command, &socket, show))
+                    .map(|outcome| {
+                        let (reply, notes) = outcome.reply();
+                        daemon::Answer { reply, notes }
+                    })
+            }
         };
         report_record(answer)
     }

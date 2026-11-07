@@ -171,9 +171,14 @@ pub fn plan(
     load: Option<f32>,
 ) -> Result<Job> {
     let wanted = area(target, monitors, focused)?;
-    let screens: Vec<&MonitorInfo> = monitors.iter().filter(|m| m.rect.intersect(wanted).is_some()).collect();
+    let screens: Vec<&MonitorInfo> = monitors
+        .iter()
+        .filter(|m| m.rect.intersect(wanted).is_some())
+        .collect();
     if screens.len() > 1 {
-        bail!("recording several screens at once isn't supported yet: pick one screen, or a region inside one");
+        bail!(
+            "recording several screens at once isn't supported yet: pick one screen, or a region inside one"
+        );
     }
     let area = inset(wanted, monitors)?;
     let native = screens
@@ -272,7 +277,9 @@ pub fn gsr_args(job: &Job, out: &Path) -> Vec<String> {
         "-fm".into(),
         if job.variable { "vfr" } else { "cfr" }.into(),
     ];
-    args.extend(strings(["-k", codec, "-q", quality, "-c", "mp4", "-cursor", "yes"]));
+    args.extend(strings([
+        "-k", codec, "-q", quality, "-c", "mp4", "-cursor", "yes",
+    ]));
     // Written once the first frame is in: the signal that recording really started.
     args.extend(strings(["-write-first-frame-ts", "yes"]));
     if let Some((w, h)) = job.size {
@@ -323,7 +330,13 @@ pub fn gif_args(job: &Job, video: &Path, gif: &Path) -> Vec<String> {
     );
     let mut args: Vec<String> = strings(["-v", "error", "-y", "-i"]).collect();
     args.push(video.display().to_string());
-    args.extend(["-vf".into(), filter, "-loop".into(), "0".into(), gif.display().to_string()]);
+    args.extend([
+        "-vf".into(),
+        filter,
+        "-loop".into(),
+        "0".into(),
+        gif.display().to_string(),
+    ]);
     args
 }
 
@@ -353,7 +366,11 @@ mod tests {
     fn targets_cover_their_screens() {
         let m = three();
         assert_eq!(area(&Target::Focused, &m, Some("DP-2")).unwrap(), m[2].rect);
-        assert_eq!(area(&Target::Focused, &m, None).unwrap(), m[0].rect, "first when unknown");
+        assert_eq!(
+            area(&Target::Focused, &m, None).unwrap(),
+            m[0].rect,
+            "first when unknown"
+        );
         assert_eq!(area(&Target::Focused, &m, Some("gone")).unwrap(), m[0].rect);
         assert_eq!(area(&Target::All, &m, None).unwrap(), Rect::new(0, 0, 7680, 1440));
         assert_eq!(
@@ -437,7 +454,11 @@ mod tests {
         assert_eq!(frame_rate(Fps::Adaptive, Some(144), Some(0.1)), (144, true));
         assert_eq!(frame_rate(Fps::Adaptive, Some(144), Some(0.8)), (30, true));
         assert_eq!(frame_rate(Fps::Adaptive, Some(50), Some(0.6)), (50, true));
-        assert_eq!(frame_rate(Fps::Adaptive, Some(144), None), (60, true), "no reading: middle");
+        assert_eq!(
+            frame_rate(Fps::Adaptive, Some(144), None),
+            (60, true),
+            "no reading: middle"
+        );
     }
 
     #[test]
@@ -480,7 +501,14 @@ mod tests {
         assert_eq!(job.codec, Codec::Av1);
         assert_eq!(job.notes.len(), 1, "{:?}", job.notes);
         // Narrow enough: stays H.264.
-        let job = plan(&Target::Region(Rect::new(10, 10, 4000, 1000)), settings, &m, None, None).unwrap();
+        let job = plan(
+            &Target::Region(Rect::new(10, 10, 4000, 1000)),
+            settings,
+            &m,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(job.codec, Codec::H264);
     }
 
@@ -588,7 +616,11 @@ mod tests {
         assert!(has(&args, &["-F", "scale=1280:718"]));
         assert!(has(&args, &["-f", "/v/a.mp4"]));
         assert!(args.iter().any(|a| a == "-a"));
-        assert!(!wf_args(&job(), Path::new("/v/a.mp4")).iter().any(|a| a == "-a" || a == "-F"));
+        assert!(
+            !wf_args(&job(), Path::new("/v/a.mp4"))
+                .iter()
+                .any(|a| a == "-a" || a == "-F")
+        );
     }
 
     #[test]

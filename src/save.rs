@@ -143,7 +143,12 @@ impl Config {
 
 /// Create a new, empty file in `dir` (created if missing) named `<prefix>_<timestamp>.<ext>`,
 /// with `_1`, `_2`, ... appended if taken. Existing files are never touched.
-pub fn reserve(dir: &Path, prefix: &str, ext: &str, time: DateTime<Local>) -> Result<(PathBuf, std::fs::File)> {
+pub fn reserve(
+    dir: &Path,
+    prefix: &str,
+    ext: &str,
+    time: DateTime<Local>,
+) -> Result<(PathBuf, std::fs::File)> {
     use std::{fs::OpenOptions, io::ErrorKind};
 
     use anyhow::Context;
@@ -242,8 +247,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (first, _) = reserve(dir.path(), "screencast", "mp4", time()).unwrap();
         let (second, _) = reserve(dir.path(), "screencast", "mp4", time()).unwrap();
-        assert_eq!(first.file_name().unwrap(), "screencast_2026-11-06_14-05-09.042.mp4");
-        assert_eq!(second.file_name().unwrap(), "screencast_2026-11-06_14-05-09.042_1.mp4");
+        assert_eq!(
+            first.file_name().unwrap(),
+            "screencast_2026-11-06_14-05-09.042.mp4"
+        );
+        assert_eq!(
+            second.file_name().unwrap(),
+            "screencast_2026-11-06_14-05-09.042_1.mp4"
+        );
         assert!(first.exists() && second.exists(), "reserved on disk");
     }
 
@@ -254,7 +265,10 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(config.video_dir(None), default_video_dir());
-        assert!(default_video_dir().ends_with("Videos/Screencapture") || default_video_dir().ends_with("Screencapture"));
+        assert!(
+            default_video_dir().ends_with("Videos/Screencapture")
+                || default_video_dir().ends_with("Screencapture")
+        );
         let config = Config {
             video_dir: Some("/clips".into()),
             ..config

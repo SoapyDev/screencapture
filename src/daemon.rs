@@ -129,8 +129,8 @@ pub fn send(path: &Path, request: &Request) -> Option<Result<Answer>> {
                 notes.push(note.to_string());
                 continue;
             }
-            let reply =
-                Reply::parse(&line).ok_or_else(|| anyhow::anyhow!("daemon sent an unexpected reply: {line:?}"))?;
+            let reply = Reply::parse(&line)
+                .ok_or_else(|| anyhow::anyhow!("daemon sent an unexpected reply: {line:?}"))?;
             return Ok(Answer { reply, notes });
         }
         anyhow::bail!("the daemon hung up without answering")
@@ -199,24 +199,41 @@ pub fn bind(path: &Path) -> Result<UnixListener> {
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Accept requests forever, handing each to `handle` (malformed ones are answered here). After
-/// `idle` without a request, `on_idle` runs, once per quiet spell.
+/// `idle` without a request, `on_idle` runs, once per quiet spell. `watch` runs before every
+/// wait and says when it wants to run again (`None`: only after the next request).
 pub fn serve(
     listener: &UnixListener,
     idle: Option<std::time::Duration>,
     mut on_idle: impl FnMut(),
+    mut watch: impl FnMut() -> Option<std::time::Duration>,
     mut handle: impl FnMut(Pending),
 ) {
     let mut idled = false;
+    let mut quiet_since = std::time::Instant::now();
     loop {
-        if let Some(after) = idle.filter(|_| !idled)
-            && !readable_within(listener, after)
+        let check = watch();
+        let idle_left = idle
+            .filter(|_| !idled)
+            .map(|after| (quiet_since + after).saturating_duration_since(std::time::Instant::now()));
+        let wait = match (idle_left, check) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(wait) = wait
+            && !readable_within(listener, wait)
         {
-            on_idle();
-            idled = true;
+            if let Some(after) = idle
+                && !idled
+                && quiet_since.elapsed() >= after
+            {
+                on_idle();
+                idled = true;
+            }
             continue;
         }
         let Some(pending) = accept(listener) else { continue };
         idled = false;
+        quiet_since = std::time::Instant::now();
         handle(pending);
     }
 }
@@ -286,7 +303,11 @@ mod tests {
         ] {
             assert_eq!(Request::parse(&request.encode()), Some(request));
         }
-        assert_eq!(encode_mode(Mode::Region), Request::Overlay(Mode::Region).encode(), "old clients");
+        assert_eq!(
+            encode_mode(Mode::Region),
+            Request::Overlay(Mode::Region).encode(),
+            "old clients"
+        );
         assert_eq!(Request::parse("record dance"), None);
         assert_eq!(Request::parse("dance"), None);
     }
@@ -298,12 +319,18 @@ mod tests {
         let path = dir.path().join("run").join("d.sock");
         let listener = bind(&path).unwrap();
         std::thread::spawn(move || {
-            serve(&listener, None, || {}, |mut pending| {
-                assert_eq!(pending.request, Request::Record(Command::Stop));
-                pending.note("first");
-                pending.note("two\nlines");
-                pending.reply(&Reply::NotRecording);
-            });
+            serve(
+                &listener,
+                None,
+                || {},
+                || None,
+                |mut pending| {
+                    assert_eq!(pending.request, Request::Record(Command::Stop));
+                    pending.note("first");
+                    pending.note("two\nlines");
+                    pending.reply(&Reply::NotRecording);
+                },
+            );
         });
         let answer = send(&path, &Request::Record(Command::Stop)).unwrap().unwrap();
         assert_eq!(
@@ -346,6 +373,7 @@ mod tests {
                 &listener,
                 None,
                 || {},
+                || None,
                 |pending| {
                     let reply = match pending.request {
                         Request::Overlay(Mode::Region) => Reply::Saved("/x.png".into()),
@@ -377,7 +405,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run").join("d.sock");
         let listener = bind(&path).unwrap();
-        std::thread::spawn(move || serve(&listener, None, || {}, |pending| pending.reply(&Reply::Cancelled)));
+        std::thread::spawn(move || {
+            serve(
+                &listener,
+                None,
+                || {},
+                || None,
+                |pending| pending.reply(&Reply::Cancelled),
+            );
+        });
         let _silent = UnixStream::connect(&path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(request(&path, Mode::Region).unwrap().unwrap()));
@@ -405,6 +441,7 @@ mod tests {
                 move || {
                     counter.fetch_add(1, Ordering::Relaxed);
                 },
+                || None,
                 |pending| pending.reply(&Reply::Cancelled),
             );
         });
@@ -413,6 +450,41 @@ mod tests {
         assert_eq!(request(&path, Mode::Region).unwrap().unwrap(), Reply::Cancelled);
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(idled.load(Ordering::Relaxed), 2, "again after the next request");
+    }
+
+    #[test]
+    fn the_watch_hook_runs_as_often_as_it_asks() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run").join("d.sock");
+        let listener = bind(&path).unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let counter = ticks.clone();
+        std::thread::spawn(move || {
+            serve(
+                &listener,
+                None,
+                || {},
+                // Every 20 ms for the first 5 calls, then no more.
+                move || {
+                    (counter.fetch_add(1, Ordering::Relaxed) < 5)
+                        .then_some(std::time::Duration::from_millis(20))
+                },
+                |pending| pending.reply(&Reply::Cancelled),
+            );
+        });
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(
+            ticks.load(Ordering::Relaxed),
+            6,
+            "5 timed wake-ups, then it waits for clients"
+        );
+        assert_eq!(request(&path, Mode::Region).unwrap().unwrap(), Reply::Cancelled);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(ticks.load(Ordering::Relaxed), 7, "and once more after a request");
     }
 
     #[test]
@@ -451,7 +523,15 @@ mod tests {
         let path = open.join("d.sock");
         let listener = UnixListener::bind(&path).unwrap();
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        std::thread::spawn(move || serve(&listener, None, || {}, |pending| pending.reply(&Reply::Busy)));
+        std::thread::spawn(move || {
+            serve(
+                &listener,
+                None,
+                || {},
+                || None,
+                |pending| pending.reply(&Reply::Busy),
+            );
+        });
         assert!(request(&path, Mode::Region).is_none(), "falls back to standalone");
     }
 }

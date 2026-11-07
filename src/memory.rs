@@ -7,20 +7,32 @@
 
 /// Pin glibc's mmap threshold so screen-sized buffers are always mapped, and unmapped when
 /// freed. Measured: no cost to capture latency (fresh pages come as transparent huge pages).
-pub fn tune() {
+pub fn tune() -> anyhow::Result<()> {
+    // Setting either disables glibc's dynamic adjustment of both.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: plain malloc parameter changes, before any thread that could race them is busy.
-    unsafe {
-        // Setting either disables glibc's dynamic adjustment of both.
-        libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20);
-        libc::mallopt(libc::M_TRIM_THRESHOLD, 4 << 20);
+    {
+        set_malloc_option(libc::M_MMAP_THRESHOLD, 1 << 20)?;
+        set_malloc_option(libc::M_TRIM_THRESHOLD, 4 << 20)?;
     }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn set_malloc_option(option: libc::c_int, value: libc::c_int) -> anyhow::Result<()> {
+    // SAFETY: `mallopt` has no preconditions: it takes the allocator's lock itself and only
+    // changes tuning parameters (glibc 2.44 even reports success for values it ignores). Our
+    // values are the two constants above; `glibc_accepts_the_tuning` and the threshold test
+    // check their effect.
+    let accepted = unsafe { libc::mallopt(option, value) } == 1;
+    anyhow::ensure!(accepted, "glibc refused malloc option {option} = {value}");
+    Ok(())
 }
 
 /// Hand memory freed by an overlay (heap fragments from drawing, text, layout) back to the OS.
 pub fn release() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: thread-safe glibc call with no preconditions.
+    // SAFETY: `malloc_trim` has no preconditions: it takes the allocator's locks itself and
+    // only returns memory that is free. Exercised by `trimming_is_harmless`.
     unsafe {
         libc::malloc_trim(0);
     }
@@ -33,8 +45,12 @@ mod tests {
 
     /// glibc marks chunks it got straight from `mmap` with bit 1 of the size word just before
     /// the pointer (`IS_MMAPPED`); such chunks are unmapped, back to the OS, on free.
-    const fn is_mmapped(buffer: &[u8]) -> bool {
-        // SAFETY: every malloc chunk is preceded by its (aligned) size word.
+    fn is_mmapped(buffer: &[u8]) -> bool {
+        // An empty Vec owns no malloc chunk: there would be no header to read.
+        assert!(!buffer.is_empty(), "needs a malloc'd buffer");
+        // SAFETY: a non-empty Vec<u8> buffer is the start of a malloc chunk (the global
+        // allocator is glibc's, and u8 needs no extra alignment), and glibc puts the chunk's
+        // size word right before it. Checked against known heap and mapped blocks below.
         let size_word = unsafe {
             buffer
                 .as_ptr()
@@ -47,11 +63,29 @@ mod tests {
 
     #[test]
     fn screen_sized_buffers_return_to_the_os_after_bigger_ones_were_freed() {
-        tune();
+        tune().unwrap();
         // What used to raise glibc's threshold past a screen's size.
         drop(std::hint::black_box(vec![1_u8; 32 << 20]));
         let screen = std::hint::black_box(vec![1_u8; 2560 * 1440 * 4]);
         assert!(is_mmapped(&screen));
+    }
+
+    #[test]
+    fn glibc_accepts_the_tuning() {
+        assert!(tune().is_ok());
+    }
+
+    // The header check the threshold test rests on, against blocks of known origin.
+    #[test]
+    fn small_blocks_read_as_heap_chunks() {
+        let small = std::hint::black_box(vec![1_u8; 1024]);
+        assert!(!is_mmapped(&small));
+    }
+
+    #[test]
+    fn huge_blocks_read_as_mapped_chunks() {
+        let huge = std::hint::black_box(vec![1_u8; 64 << 20]);
+        assert!(is_mmapped(&huge));
     }
 
     #[test]

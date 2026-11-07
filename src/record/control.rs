@@ -10,12 +10,15 @@ use super::{
     recorder::Active,
     settings::{Fps, Overrides, Settings},
 };
-use crate::capture::MonitorInfo;
+use crate::capture::{MonitorInfo, Rect};
 
 /// What a command did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Started { path: PathBuf, notes: Vec<String> },
+    Started {
+        path: PathBuf,
+        notes: Vec<String>,
+    },
     Saved(PathBuf),
     /// A start while this one runs.
     AlreadyRecording(PathBuf),
@@ -37,6 +40,8 @@ pub trait Env {
 #[derive(Default)]
 pub struct Recorder {
     active: Option<Active>,
+    /// Recorded area and the screens then, while recording.
+    frame: Option<(Rect, Vec<MonitorInfo>)>,
 }
 
 impl Recorder {
@@ -67,12 +72,14 @@ impl Recorder {
             let load = (settings.fps == Fps::Adaptive).then(|| env.load()).flatten();
             let job = plan::plan(target, settings, &monitors, focused.as_deref(), load)?;
             let notes = job.notes.clone();
-            anyhow::Ok((env.start(job, &dir)?, notes))
+            let area = job.area;
+            anyhow::Ok((env.start(job, &dir)?, notes, (area, monitors)))
         })();
         match started {
-            Ok((active, notes)) => {
+            Ok((active, notes, frame)) => {
                 let path = active.path.clone();
                 self.active = Some(active);
+                self.frame = Some(frame);
                 Outcome::Started { path, notes }
             }
             Err(e) => Outcome::Failed(format!("{e:#}")),
@@ -80,11 +87,17 @@ impl Recorder {
     }
 
     fn stop(&mut self) -> Outcome {
+        self.frame = None;
         match self.active.take().map(Active::stop) {
             None => Outcome::NotRecording,
             Some(Ok(path)) => Outcome::Saved(path),
             Some(Err(e)) => Outcome::Failed(format!("{e:#}")),
         }
+    }
+
+    /// The recorded area and the screens around it, for the frame shown while recording.
+    pub fn frame(&self) -> Option<(Rect, Vec<MonitorInfo>)> {
+        self.frame.clone()
     }
 
     /// The file being recorded, if a recording runs.
@@ -195,7 +208,6 @@ pub mod testing {
             super::super::recorder::spawn_fake(dir, self.script, job)
         }
     }
-
 }
 
 #[cfg(test)]
@@ -251,8 +263,24 @@ mod tests {
     }
 
     #[test]
+    fn the_frame_follows_the_recording() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        assert_eq!(r.frame(), None);
+        r.run(start(), &mut env);
+        let (area, monitors) = r.frame().unwrap();
+        assert_eq!(area, env.jobs[0].area);
+        assert_eq!(monitors.len(), 1);
+        r.run(Command::Stop, &mut env);
+        assert_eq!(r.frame(), None);
+    }
+
+    #[test]
     fn stop_without_a_recording() {
-        assert_eq!(Recorder::default().run(Command::Stop, &mut Fake::new()), Outcome::NotRecording);
+        assert_eq!(
+            Recorder::default().run(Command::Stop, &mut Fake::new()),
+            Outcome::NotRecording
+        );
     }
 
     #[test]

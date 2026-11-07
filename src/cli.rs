@@ -87,7 +87,9 @@ impl Cli {
             // Empty list means "every screen", resolved once the monitors are known.
             Some(Command::All) => Plan::Capture(Request::Screens(Vec::new())),
             Some(Command::List) => Plan::List,
-            Some(Command::Record { what, overrides }) => Plan::Record(record_command(what.as_ref(), *overrides)),
+            Some(Command::Record { what, overrides }) => {
+                Plan::Record(record_command(what.as_ref(), *overrides))
+            }
             #[cfg(unix)]
             Some(Command::Daemon) => Plan::Daemon,
         }
@@ -188,11 +190,28 @@ mod tests {
             quality: Some(Quality::High),
             audio: Some(Audio::Both),
         };
-        let args = ["--fps", "30", "--resolution", "1080p", "--format", "h264", "--quality", "high", "--audio", "both"];
+        let args = [
+            "--fps",
+            "30",
+            "--resolution",
+            "1080p",
+            "--format",
+            "h264",
+            "--quality",
+            "high",
+            "--audio",
+            "both",
+        ];
         let after: Vec<&str> = ["record", "all"].into_iter().chain(args).collect();
-        assert_eq!(plan(&after), Plan::Record(RecordCommand::Start(Target::All, expected)));
+        assert_eq!(
+            plan(&after),
+            Plan::Record(RecordCommand::Start(Target::All, expected))
+        );
         let before: Vec<&str> = std::iter::once("record").chain(args).chain(["all"]).collect();
-        assert_eq!(plan(&before), Plan::Record(RecordCommand::Start(Target::All, expected)));
+        assert_eq!(
+            plan(&before),
+            Plan::Record(RecordCommand::Start(Target::All, expected))
+        );
         assert!(Cli::try_parse_from(["screencapture", "record", "--fps", "7"]).is_err());
     }
 

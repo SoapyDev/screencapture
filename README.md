@@ -144,8 +144,11 @@ Settings, remembered under `"record"` in the config file and overridable per rec
 - H.264 plays everywhere but stops at 4096 px across; wider recordings switch to AV1, and past
   8192 px (AV1/HEVC's limit) they are scaled down to fit. You are told when either happens.
 - GIFs are recorded at most 25 fps and 1280 px wide, then converted with one palette at stop.
-- A 3 px band is left out wherever the recording touches a screen edge with no screen beyond
-  it: that is where the red recording frame will go, so it never appears in the video.
+- A red frame around the recorded area shows that a recording runs. It sits just outside the
+  area, so it is never in the video; where the area touches a screen edge with no screen beyond
+  it, a 3 px band is left out of the recording to make room for it. The frame takes no clicks
+  and no keyboard: you work normally underneath. (Wayland with layer-shell only; on X11 there is
+  no frame.)
 
 Hyprland binds, for example:
 

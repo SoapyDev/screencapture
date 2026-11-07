@@ -33,6 +33,8 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # Linux: each display server's code is only compiled when its feature is on.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# Ctrl+C while recording without the daemon: a safe, signal-safe flag.
+signal-hook = "0.3"
 # Native backend for wlroots-style compositors (Hyprland, Sway, river...): xcap's wlroots path
 # fails on Hyprland with a wl_shm pool error.
 memmap2 = { version = "0.9", optional = true }
