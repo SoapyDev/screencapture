@@ -127,7 +127,7 @@ every screen. From the command line or a key binding:
 screencapture record                          # the focused screen, until stopped
 screencapture record screen DP-1              # a named screen
 screencapture record region -g "100,200 640x480"
-screencapture record all                      # every screen (one screen only, for now)
+screencapture record all                      # every screen, joined into one video
 screencapture record stop                     # finish; prints the file
 screencapture record toggle                   # start the focused screen, or stop: one key for both
 ```
@@ -153,6 +153,12 @@ Settings, remembered under `"record"` in the config file and overridable per rec
 - H.264 plays everywhere but stops at 4096 px across; wider recordings switch to AV1, and past
   8192 px (AV1/HEVC's limit) they are scaled down to fit. You are told when either happens.
 - GIFs are recorded at most 25 fps and 1280 px wide, then converted with one palette at stop.
+- Several screens (or a region across them) are recorded one screen per recorder, all started
+  together, and joined at stop into one video laid out like the desktop, without the gaps
+  between screens (like stitched screenshots). Each screen is recorded one quality preset
+  finer, since joining encodes once more. Joining runs on the GPU (NVENC) when it can, else in
+  software; it takes time: about 180 frames a second for two 1440p screens on an RTX 5080, so
+  roughly 45 s to save a minute recorded at 144 fps.
 - A red frame around the recorded area shows that a recording runs. It sits just outside the
   area, so it is never in the video; where the area touches a screen edge with no screen beyond
   it, a 3 px band is left out of the recording to make room for it. The frame takes no clicks

@@ -204,7 +204,7 @@ enum ToUi {
     /// Show the frame for this recorded area on these screens, replacing any other; `None`
     /// removes it.
     #[cfg(target_os = "linux")]
-    Frame(Option<(Rect, Vec<MonitorInfo>)>),
+    Frame(Option<(Vec<Rect>, Vec<MonitorInfo>)>),
 }
 
 /// How often the daemon checks on a running recorder (it may quit by itself).
@@ -247,7 +247,9 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
             #[cfg(target_os = "linux")]
             let send_frame = |recorder: &crate::record::Recorder| {
                 // Owned only here, to cross to the UI thread.
-                let frame = recorder.frame().map(|(area, monitors)| (area, monitors.to_vec()));
+                let frame = recorder
+                    .frame()
+                    .map(|(areas, monitors)| (areas.to_vec(), monitors.to_vec()));
                 let _ = tx.unbounded_send(ToUi::Frame(frame));
             };
             // While recording: notice a recorder that quit by itself, and take its frame down.
@@ -276,9 +278,10 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                             pending.reply(&daemon::Reply::Busy);
                             return;
                         }
-                        let before = recorder.frame().map(|(area, _)| area);
+                        // A different recording (or none) now: its frame replaces the old one.
+                        let before = recorder.recording().map(std::path::Path::to_path_buf);
                         let outcome = recorder.run(command, &mut crate::record::LiveEnv);
-                        if recorder.frame().map(|(area, _)| area) != before {
+                        if recorder.recording() != before.as_deref() {
                             send_frame(&recorder);
                         }
                         let (reply, notes) = outcome.reply();

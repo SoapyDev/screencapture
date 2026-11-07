@@ -6,11 +6,16 @@ pub mod foreground;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 pub mod frame;
 #[cfg(target_os = "linux")]
+pub mod join;
+#[cfg(target_os = "linux")]
 pub mod load;
 pub mod plan;
 #[cfg(target_os = "linux")]
 pub mod recorder;
+#[cfg(target_os = "linux")]
+pub mod session;
 pub mod settings;
+pub mod split;
 
 #[cfg(target_os = "linux")]
 pub use control::{Env, LiveEnv, Outcome, Recorder};

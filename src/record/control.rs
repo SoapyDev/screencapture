@@ -6,8 +6,8 @@ use anyhow::Result;
 
 use super::{
     command::Command,
-    plan::{self, Job, Target},
-    recorder::Active,
+    plan::{self, Plan, Target},
+    session::Session,
     settings::{Fps, Overrides, Settings},
 };
 use crate::capture::{MonitorInfo, Rect};
@@ -34,19 +34,19 @@ pub trait Env {
     fn settings(&mut self) -> (Settings, PathBuf);
     /// Busier of CPU and GPU (0..=1); only asked for the Adaptive frame rate.
     fn load(&mut self) -> Option<f32>;
-    fn start(&mut self, job: Job, dir: &Path) -> Result<Active>;
+    fn start(&mut self, plan: Plan, dir: &Path) -> Result<Session>;
 }
 
 #[derive(Default)]
 pub struct Recorder {
-    active: Option<Active>,
-    /// Recorded area and the screens then, while recording.
-    frame: Option<(Rect, Vec<MonitorInfo>)>,
+    active: Option<Session>,
+    /// Recorded areas (one per screen) and the screens then, while recording.
+    frame: Option<(Vec<Rect>, Vec<MonitorInfo>)>,
 }
 
 impl Recorder {
     pub fn run(&mut self, command: Command, env: &mut impl Env) -> Outcome {
-        let running = self.active.as_mut().map(Active::alive);
+        let running = self.active.as_mut().map(Session::alive);
         match (command, running) {
             // A recorder that quit by itself is still stopped: what it saved is reported.
             (Command::Stop | Command::Toggle(..), Some(_)) => self.stop(),
@@ -65,20 +65,15 @@ impl Recorder {
 
     fn start(&mut self, target: &Target, overrides: Overrides, env: &mut impl Env) -> Outcome {
         let started = (|| {
-            let (settings, dir) = env.settings();
-            let settings = overrides.apply(settings);
-            let monitors = env.monitors()?;
-            let focused = matches!(target, Target::Focused).then(|| env.focused()).flatten();
-            let load = (settings.fps == Fps::Adaptive).then(|| env.load()).flatten();
-            let job = plan::plan(target, settings, &monitors, focused.as_deref(), load)?;
-            let notes = job.notes.clone();
-            let area = job.area;
-            anyhow::Ok((env.start(job, &dir)?, notes, (area, monitors)))
+            let (plan, dir, monitors) = plan_for(target, overrides, env)?;
+            let notes = plan.notes.clone();
+            let areas = plan.parts.iter().map(|part| part.job.area).collect();
+            anyhow::Ok((env.start(plan, &dir)?, notes, (areas, monitors)))
         })();
         match started {
-            Ok((active, notes, frame)) => {
-                let path = active.path.clone();
-                self.active = Some(active);
+            Ok((session, notes, frame)) => {
+                let path = session.path().to_path_buf();
+                self.active = Some(session);
                 self.frame = Some(frame);
                 Outcome::Started { path, notes }
             }
@@ -88,7 +83,7 @@ impl Recorder {
 
     fn stop(&mut self) -> Outcome {
         self.frame = None;
-        match self.active.take().map(Active::stop) {
+        match self.active.take().map(Session::stop) {
             None => Outcome::NotRecording,
             Some(Ok(path)) => Outcome::Saved(path),
             Some(Err(e)) => Outcome::Failed(format!("{e:#}")),
@@ -96,14 +91,14 @@ impl Recorder {
     }
 
     /// The recorded area and the screens around it, for the frame shown while recording.
-    pub fn frame(&self) -> Option<(Rect, &[MonitorInfo])> {
-        let (area, monitors) = self.frame.as_ref()?;
-        Some((*area, monitors))
+    pub fn frame(&self) -> Option<(&[Rect], &[MonitorInfo])> {
+        let (areas, monitors) = self.frame.as_ref()?;
+        Some((areas, monitors))
     }
 
     /// The file being recorded, if a recording runs.
     pub fn recording(&self) -> Option<&Path> {
-        self.active.as_ref().map(|active| active.path.as_path())
+        self.active.as_ref().map(Session::path)
     }
 
     /// The recorder quit on its own (screen unplugged, crash): finish what it left.
@@ -113,6 +108,21 @@ impl Recorder {
         }
         Some(self.stop())
     }
+}
+
+/// The plan for `target` in `env`, the folder to record into, and the screens it saw.
+fn plan_for(
+    target: &Target,
+    overrides: Overrides,
+    env: &mut impl Env,
+) -> Result<(Plan, PathBuf, Vec<MonitorInfo>)> {
+    let (settings, dir) = env.settings();
+    let settings = overrides.apply(settings);
+    let monitors = env.monitors()?;
+    let focused = matches!(target, Target::Focused).then(|| env.focused()).flatten();
+    let load = (settings.fps == Fps::Adaptive).then(|| env.load()).flatten();
+    let plan = plan::plan(target, settings, &monitors, focused.as_deref(), load)?;
+    Ok((plan, dir, monitors))
 }
 
 /// The real machine: Wayland/Hyprland, the config file, the installed recorder.
@@ -136,9 +146,9 @@ impl Env for LiveEnv {
         super::load::sample(std::time::Duration::from_millis(200))
     }
 
-    fn start(&mut self, job: Job, dir: &Path) -> Result<Active> {
+    fn start(&mut self, plan: Plan, dir: &Path) -> Result<Session> {
         let backend = super::recorder::find_backend()?;
-        Active::start(&backend, job, dir, chrono::Local::now())
+        Session::start(&backend, plan, dir, chrono::Local::now())
     }
 }
 
@@ -169,7 +179,7 @@ pub mod testing {
         pub dir: tempfile::TempDir,
         pub settings: Settings,
         pub loads: usize,
-        pub jobs: Vec<Job>,
+        pub jobs: Vec<super::plan::Job>,
         pub script: &'static str,
     }
 
@@ -204,9 +214,10 @@ pub mod testing {
             self.loads += 1;
             Some(0.8)
         }
-        fn start(&mut self, job: Job, dir: &Path) -> Result<Active> {
-            self.jobs.push(job.clone());
-            super::super::recorder::spawn_fake(dir, self.script, job)
+        fn start(&mut self, plan: Plan, dir: &Path) -> Result<Session> {
+            self.jobs.extend(plan.parts.iter().map(|part| part.job.clone()));
+            let job = plan.parts.into_iter().next().expect("plans have a part").job;
+            super::super::recorder::spawn_fake(dir, self.script, job).map(Session::single)
         }
     }
 }
@@ -264,14 +275,24 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_follows_the_recording() {
+    fn no_frame_before_recording() {
+        assert_eq!(Recorder::default().frame(), None);
+    }
+
+    #[test]
+    fn the_frame_shows_the_recorded_area() {
         let mut env = Fake::new();
         let mut r = Recorder::default();
-        assert_eq!(r.frame(), None);
         r.run(start(), &mut env);
-        let (area, monitors) = r.frame().unwrap();
-        assert_eq!(area, env.jobs[0].area);
-        assert_eq!(monitors.len(), 1);
+        let (areas, _) = r.frame().expect("a recording runs");
+        assert_eq!(areas, [env.jobs[0].area]);
+    }
+
+    #[test]
+    fn the_frame_goes_with_the_recording() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        r.run(start(), &mut env);
         r.run(Command::Stop, &mut env);
         assert_eq!(r.frame(), None);
     }

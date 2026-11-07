@@ -17,6 +17,16 @@ pub const fn strips(area: Rect) -> [Rect; 4] {
     ]
 }
 
+/// The strips around `areas` that lie outside all of them (between two parts there is none).
+fn outline(areas: &[Rect]) -> Vec<Rect> {
+    let outside = |strip: &Rect| areas.iter().all(|area| strip.intersect(*area).is_none());
+    areas
+        .iter()
+        .flat_map(|&area| strips(area))
+        .filter(outside)
+        .collect()
+}
+
 /// One monitor's part of the frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Surface {
@@ -27,10 +37,10 @@ pub struct Surface {
     pub strips: Vec<Rect>,
 }
 
-/// Surfaces for the frame around `area`, plus whatever `extra` (drawings' bounds) needs room
-/// on screen; monitors with nothing to show get none.
-pub fn surfaces(area: Rect, extra: &[Rect], monitors: &[MonitorInfo]) -> Vec<Surface> {
-    let frame = strips(area);
+/// Surfaces for the frame around `areas` (a recording's parts, one per screen), plus whatever
+/// `extra` (drawings' bounds) needs room on screen; monitors with nothing to show get none.
+pub fn surfaces(areas: &[Rect], extra: &[Rect], monitors: &[MonitorInfo]) -> Vec<Surface> {
+    let frame = outline(areas);
     monitors
         .iter()
         .filter_map(|monitor| {
@@ -84,7 +94,7 @@ mod tests {
     fn one_small_surface_around_a_region() {
         let m = [monitor("DP-1", 0), monitor("DP-2", 2560)];
         let area = Rect::new(100, 200, 640, 480);
-        let s = surfaces(area, &[], &m);
+        let s = surfaces(&[area], &[], &m);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].monitor.name, "DP-1");
         assert_eq!(
@@ -103,7 +113,7 @@ mod tests {
         let m = [monitor("DP-1", 0), monitor("DP-2", 2560)];
         // A full DP-2 after the inset: its left strip lands on DP-1's right edge.
         let area = Rect::new(2560, BORDER, 2560 - BORDER, 1440 - 2 * BORDER);
-        let s = surfaces(area, &[], &m);
+        let s = surfaces(&[area], &[], &m);
         let names: Vec<&str> = s.iter().map(|s| s.monitor.name.as_str()).collect();
         assert_eq!(names, ["DP-1", "DP-2"]);
         assert_eq!(
@@ -132,7 +142,7 @@ mod tests {
     fn drawings_widen_the_surface() {
         let m = [monitor("DP-1", 0)];
         let area = Rect::new(100, 200, 640, 480);
-        let s = surfaces(area, &[Rect::new(50, 900, 100, 100)], &m);
+        let s = surfaces(&[area], &[Rect::new(50, 900, 100, 100)], &m);
         assert_eq!(
             s[0].bounds,
             Rect::new(50, 200 - BORDER, 640 + BORDER + 50, 800 + BORDER)
@@ -142,13 +152,34 @@ mod tests {
     }
 
     #[test]
+    fn no_strip_runs_between_two_parts() {
+        let m = [monitor("DP-1", 0), monitor("DP-2", 2560)];
+        let left = Rect::new(BORDER, BORDER, 2560 - BORDER, 1000);
+        let right = Rect::new(2560, BORDER, 1000, 1000);
+        let parts = [left, right];
+        let all: Vec<Rect> = surfaces(&parts, &[], &m)
+            .iter()
+            .flat_map(|s| {
+                s.strips
+                    .iter()
+                    .map(|r| Rect::new(r.x + s.bounds.x, r.y + s.bounds.y, r.w, r.h))
+            })
+            .collect();
+        assert!(
+            all.iter()
+                .all(|strip| parts.iter().all(|part| strip.intersect(*part).is_none())),
+            "{all:?}"
+        );
+    }
+
+    #[test]
     fn nothing_on_a_screen_means_no_surface_there() {
         let m = [
             monitor("DP-1", 0),
             monitor("DP-2", 2560),
             monitor("HDMI-A-1", 5120),
         ];
-        let s = surfaces(Rect::new(100, 200, 640, 480), &[], &m);
+        let s = surfaces(&[Rect::new(100, 200, 640, 480)], &[], &m);
         assert_eq!(s.len(), 1);
     }
 }

@@ -251,3 +251,33 @@ fn drawings_made_before_recording_are_recorded() {
     let hits = (20..620).filter(|&x| on_line(x)).count();
     assert!(hits > 500, "line found on {hits} of 600 columns");
 }
+
+/// The widest screen, from `screencapture list` (`name<TAB>x,y WxH` lines).
+fn widest_screen() -> u32 {
+    let listed = bin().arg("list").output().expect("the binary under test runs");
+    let text = String::from_utf8(listed.stdout).expect("screen names are text");
+    let width = |line: &str| line.rsplit_once(' ')?.1.split_once('x')?.0.parse::<u32>().ok();
+    text.lines().filter_map(width).max().expect("at least one screen")
+}
+
+#[test]
+#[ignore = "needs a graphical session with two screens or more, and gpu-screen-recorder; records every screen"]
+fn recording_every_screen_makes_one_video_wider_than_any_screen() {
+    let session = Session::new();
+    let recording = session
+        .command()
+        .args(["record", "all"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary under test runs");
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let stopped = session
+        .command()
+        .args(["record", "stop"])
+        .output()
+        .expect("the binary under test runs");
+    let video = saved_path(&stopped);
+    let _ = recording.wait_with_output();
+    assert!(last_frame(&video).width() > widest_screen());
+}

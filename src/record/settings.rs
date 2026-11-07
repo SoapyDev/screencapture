@@ -115,6 +115,17 @@ pub enum Quality {
     Ultra,
 }
 
+impl Quality {
+    /// One preset up (the finest stays).
+    pub const fn finer(self) -> Self {
+        match self {
+            Self::Medium => Self::High,
+            Self::High => Self::VeryHigh,
+            Self::VeryHigh | Self::Ultra => Self::Ultra,
+        }
+    }
+}
+
 /// Sound recorded with the picture, from the default devices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 pub enum Audio {
@@ -353,6 +364,16 @@ mod tests {
         assert_eq!(Fps::Adaptive.fixed(), None);
         assert_eq!(Resolution::P1080.max_height(), Some(1080));
         assert_eq!(Resolution::Native.max_height(), None);
+    }
+
+    #[test]
+    fn finer_quality_is_one_preset_up() {
+        assert_eq!(Quality::High.finer(), Quality::VeryHigh);
+    }
+
+    #[test]
+    fn the_finest_quality_has_nothing_finer() {
+        assert_eq!(Quality::Ultra.finer(), Quality::Ultra);
     }
 
     #[test]

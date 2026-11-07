@@ -15,8 +15,8 @@ use std::{
 use super::{Env, Outcome, Recorder, command::Command};
 use crate::daemon::{self, Reply, Request};
 
-/// The recorded area and the screens, while recording; `None` once it ended.
-pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<(crate::capture::Rect, &[crate::capture::MonitorInfo])>);
+/// The recorded areas (one per screen) and the screens, while recording; `None` once it ended.
+pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<(&[crate::capture::Rect], &[crate::capture::MonitorInfo])>);
 
 /// Record `command` (a start), in this process, until told to stop. Prints how to stop it.
 pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Result<Outcome> {

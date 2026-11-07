@@ -88,9 +88,18 @@ impl Active {
         } else {
             path.clone()
         };
+        Self::launch(backend, job, path, video)
+    }
+
+    /// Record `job` (one screen of several) into `video`.
+    pub fn start_part(backend: &Backend, job: Job, video: PathBuf) -> Result<Self> {
+        Self::launch(backend, job, video.clone(), video)
+    }
+
+    fn launch(backend: &Backend, job: Job, path: PathBuf, video: PathBuf) -> Result<Self> {
         match backend {
             Backend::Gsr(program) => {
-                let stamp = PathBuf::from(format!("{}.ts", video.display()));
+                let stamp = first_frame_file(&video);
                 let args = plan::gsr_args(&job, &video);
                 let files = Files {
                     path,
@@ -241,7 +250,28 @@ impl Active {
 
     /// Finish the file (and the GIF) and return its path.
     pub fn stop(mut self) -> Result<PathBuf> {
+        self.finish_video()?;
+        if self.job.gif {
+            convert_to_gif(self.job.fps, &self.video, &self.path)?;
+        }
+        Ok(self.path.clone())
+    }
+
+    /// Finish the file of one screen of several, and say when its first frame was taken.
+    pub fn stop_part(mut self) -> Result<Stopped> {
+        let first_frame = self.finish_video()?;
+        Ok(Stopped {
+            video: self.video.clone(),
+            first_frame,
+        })
+    }
+
+    /// Stop the recorder and check it left a video; the first frame's time, if it said.
+    fn finish_video(&mut self) -> Result<Option<u64>> {
         self.finish()?;
+        let first_frame = std::fs::read_to_string(first_frame_file(&self.video))
+            .ok()
+            .and_then(|text| parse_first_frame(&text));
         for file in &self.leftovers {
             let _ = std::fs::remove_file(file);
         }
@@ -250,24 +280,7 @@ impl Active {
             self.discard();
             bail!(message);
         }
-        if self.job.gif {
-            let converted = Command::new("ffmpeg")
-                .args(plan::gif_args(&self.job, &self.video, &self.path))
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .output()
-                .context("running ffmpeg for the GIF")?;
-            if !converted.status.success() {
-                let _ = std::fs::remove_file(&self.path);
-                bail!(
-                    "GIF conversion failed ({}); the video is kept at {}",
-                    String::from_utf8_lossy(&converted.stderr).trim(),
-                    self.video.display()
-                );
-            }
-            let _ = std::fs::remove_file(&self.video);
-        }
-        Ok(self.path.clone())
+        Ok(first_frame)
     }
 
     /// Stop and throw the recording away.
@@ -282,6 +295,52 @@ impl Drop for Active {
     fn drop(&mut self) {
         let _ = self.finish();
     }
+}
+
+/// A finished part of a recording.
+#[derive(Debug)]
+pub struct Stopped {
+    pub video: PathBuf,
+    /// When its first frame was taken, µs on the monotonic clock.
+    pub first_frame: Option<u64>,
+}
+
+/// gpu-screen-recorder's first-frame timestamp file for `video`.
+fn first_frame_file(video: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.ts", video.display()))
+}
+
+/// The monotonic µs in a first-frame timestamp file (a header line, then the values).
+pub fn parse_first_frame(text: &str) -> Option<u64> {
+    let values = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    values.split_whitespace().next()?.parse().ok()
+}
+
+/// Run ffmpeg with `args`; `what` names the job in errors.
+pub fn ffmpeg(args: &[String], what: &str) -> Result<()> {
+    let ran = Command::new("ffmpeg")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .with_context(|| format!("running ffmpeg to {what}"))?;
+    if !ran.status.success() {
+        bail!(
+            "ffmpeg could not {what}: {}",
+            String::from_utf8_lossy(&ran.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// `video` as an animated GIF at `fps`; the video is removed once converted, kept otherwise.
+pub fn convert_to_gif(fps: u32, video: &Path, gif: &Path) -> Result<()> {
+    if let Err(e) = ffmpeg(&plan::gif_args(fps, video, gif), "make the GIF") {
+        let _ = std::fs::remove_file(gif);
+        bail!("{e:#}; the video is kept at {}", video.display());
+    }
+    let _ = std::fs::remove_file(video);
+    Ok(())
 }
 
 /// A stand-in recorder for tests: writes `$1` and `$1.ts` at once, finishes the file on SIGINT.
@@ -346,7 +405,6 @@ mod tests {
             quality: Quality::VeryHigh,
             audio: Audio::Off,
             gif,
-            notes: Vec::new(),
         }
     }
 
@@ -371,6 +429,17 @@ mod tests {
             path.display().to_string(),
         ];
         Active::spawn(Path::new("/bin/sh"), &args, &ready, files, job(gif))
+    }
+
+    #[test]
+    fn the_first_frame_time_follows_the_header() {
+        let text = "monotonic_microsec\trealtime_microsec\n123456\t1700000000000000\n";
+        assert_eq!(parse_first_frame(text), Some(123_456));
+    }
+
+    #[test]
+    fn an_empty_first_frame_file_has_no_time() {
+        assert_eq!(parse_first_frame(""), None);
     }
 
     #[test]

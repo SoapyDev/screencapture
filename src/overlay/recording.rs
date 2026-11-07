@@ -17,7 +17,8 @@ use crate::{
     expect(dead_code, reason = "the frame needs layer-shell")
 )]
 pub struct Spec {
-    pub area: Rect,
+    /// The recorded parts, one per screen.
+    pub areas: Vec<Rect>,
     pub monitors: Vec<MonitorInfo>,
     pub shapes: Vec<Shape>,
 }
@@ -87,7 +88,7 @@ mod view {
     /// Open the frame (and drawings) for `spec`.
     pub fn show(spec: &Spec, cx: &mut App) -> Shown {
         let extra: Vec<Rect> = spec.shapes.iter().map(shape_rect).collect();
-        let surfaces = frame::surfaces(spec.area, &extra, &spec.monitors);
+        let surfaces = frame::surfaces(&spec.areas, &extra, &spec.monitors);
         let shapes: Arc<[Shape]> = spec.shapes.clone().into();
         let displays = cx.displays();
         let mut shown = Shown::default();

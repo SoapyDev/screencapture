@@ -30,10 +30,10 @@ pub fn take_drawings(cx: &mut App) -> Vec<Shape> {
 }
 
 /// The frame's spec for `frame` (from the recorder), with the drawings waiting for it.
-pub fn spec_for(frame: Option<(Rect, Vec<MonitorInfo>)>, cx: &mut App) -> Option<Spec> {
-    let (area, monitors) = frame?;
+pub fn spec_for(frame: Option<(Vec<Rect>, Vec<MonitorInfo>)>, cx: &mut App) -> Option<Spec> {
+    let (areas, monitors) = frame?;
     Some(Spec {
-        area,
+        areas,
         monitors,
         shapes: take_drawings(cx),
     })
@@ -86,7 +86,7 @@ pub fn drive_frames(drawings: Vec<Shape>, work: impl FnOnce(ShowFrame) + Send + 
     std::thread::spawn(move || {
         work(&mut |frame| {
             // Owned only here, to cross to the UI thread.
-            let frame = frame.map(|(area, monitors)| (area, monitors.to_vec()));
+            let frame = frame.map(|(areas, monitors)| (areas.to_vec(), monitors.to_vec()));
             let _ = tx.unbounded_send(Some(frame));
         });
         let _ = tx.unbounded_send(None);
