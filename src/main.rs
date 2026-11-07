@@ -5,6 +5,7 @@ mod clipboard;
 mod config;
 #[cfg(unix)]
 mod daemon;
+mod drawings;
 #[cfg(unix)]
 mod hyprland;
 mod job;

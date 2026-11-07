@@ -8,22 +8,22 @@ use gpui::{App, AppContext, Global};
 
 use super::recording::{self, Shown, Spec};
 use crate::{
-    annotate::Shape,
     daemon::{self, Reply, Request},
+    drawings::Shared,
     record::{OnScreen, command::Command, foreground::ShowFrame},
 };
 
 /// Drawings made in the overlay, waiting for the frame of the recording it started (UI thread).
 #[derive(Default)]
-struct FrameDrawings(Vec<Shape>);
+struct FrameDrawings(Option<Shared>);
 
 impl Global for FrameDrawings {}
 
 /// The drawings for the frame now opening; there are none for recordings not started from the
 /// overlay.
-pub fn take_drawings(cx: &mut App) -> Vec<Shape> {
+pub fn take_drawings(cx: &mut App) -> Option<Shared> {
     if !cx.has_global::<FrameDrawings>() {
-        return Vec::new();
+        return None;
     }
     cx.remove_global::<FrameDrawings>().0
 }
@@ -32,7 +32,7 @@ pub fn take_drawings(cx: &mut App) -> Vec<Shape> {
 pub fn spec_for(frame: Option<OnScreen>, cx: &mut App) -> Option<Spec> {
     Some(Spec {
         on_screen: frame?,
-        shapes: take_drawings(cx),
+        drawings: take_drawings(cx),
     })
 }
 
@@ -46,7 +46,12 @@ pub fn replace_frame(shown: &mut Option<Shown>, spec: Option<Spec>, cx: &mut App
 
 /// Hand `command` to the daemon once the overlay is off the screens, and pass its answer to
 /// `client` (the Print that opened the overlay).
-pub fn through_daemon(command: Command, drawings: Vec<Shape>, client: Option<daemon::Client>, cx: &mut App) {
+pub fn through_daemon(
+    command: Command,
+    drawings: Option<Shared>,
+    client: Option<daemon::Client>,
+    cx: &mut App,
+) {
     cx.set_global(FrameDrawings(drawings));
     cx.spawn(async move |cx| {
         // Until the overlay is off the screens.
@@ -76,7 +81,7 @@ fn reply_of(answer: Option<anyhow::Result<daemon::Answer>>) -> Reply {
 
 /// Run `work` on its own thread while this app shows the frames it asks for, then quit.
 /// `drawings` go with its first frame.
-pub fn drive_frames(drawings: Vec<Shape>, work: impl FnOnce(ShowFrame) + Send + 'static, cx: &mut App) {
+pub fn drive_frames(drawings: Option<Shared>, work: impl FnOnce(ShowFrame) + Send + 'static, cx: &mut App) {
     cx.set_global(FrameDrawings(drawings));
     // `Some(frame)`: show it (or take it down); `None`: the work is done.
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -110,7 +115,7 @@ pub fn with_recording_frame<R: Send + 'static>(work: impl FnOnce(ShowFrame) -> R
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_quit_mode(gpui::QuitMode::Explicit);
         drive_frames(
-            Vec::new(),
+            None,
             move |show| *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(work(show)),
             cx,
         );
@@ -123,7 +128,7 @@ pub fn with_recording_frame<R: Send + 'static>(work: impl FnOnce(ShowFrame) -> R
 /// process takes the daemon's place on the socket until `record stop`; `report` gets the end.
 pub fn in_this_process(
     command: Command,
-    drawings: Vec<Shape>,
+    drawings: Option<Shared>,
     report: impl FnOnce(anyhow::Result<crate::record::Outcome>) + Send + 'static,
     cx: &mut App,
 ) {

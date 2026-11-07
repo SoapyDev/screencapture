@@ -188,7 +188,7 @@ impl Overlay {
             return;
         }
         let command = Command::Start(target, Overrides::from(self.config.recording.record));
-        let drawings = self.annotations.shapes().cloned().collect();
+        let drawings = super::drawn::Drawn::of(self.annotations.shapes());
         self.phase = Phase::Done;
         super::GATE.leave(std::time::Instant::now());
         let entity = cx.entity();

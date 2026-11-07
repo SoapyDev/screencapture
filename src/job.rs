@@ -5,26 +5,26 @@ use std::path::Path;
 use anyhow::Result;
 use image::RgbaImage;
 
-use crate::{annotate::Shape, capture::Snapshot, overlay::layout::needs, selection::Request};
+use crate::{capture::Snapshot, drawings::Drawings, overlay::layout::needs, selection::Request};
 
 /// Capture what `request` asks for. Only the monitors involved are copied.
 pub fn grab(request: &Request) -> Result<RgbaImage> {
-    compose(&Snapshot::take_where(|m| needs(request, m))?, request, &[])
+    compose(&Snapshot::take_where(|m| needs(request, m))?, request, None)
 }
 
-/// The final image for an overlay selection: cut from the frozen `snapshot`, with the drawn
-/// `shapes` burnt in at the output's pixel density.
+/// The final image for an overlay selection: cut from the frozen `snapshot`, with any
+/// `drawings` burnt in at the output's pixel density.
 pub fn compose<C: std::ops::Deref<Target = [u8]>>(
     snapshot: &Snapshot<C>,
     request: &Request,
-    shapes: &[Shape],
+    drawings: Option<&dyn Drawings>,
 ) -> Result<RgbaImage> {
     let mut image = snapshot.grab(request)?;
     // Screens are BGRA; the PNG (and the drawing colours) are RGBA.
     crate::capture::swap_red_blue(&mut image);
-    if shapes.is_empty() {
+    let Some(drawings) = drawings else {
         return Ok(image);
-    }
+    };
     // Each screen's part of the drawing goes where that screen landed, cut at its edges.
     let (placements, scale) = snapshot.placements(request)?;
     let px = |v: i32| (f64::from(v) * scale).round().max(0.) as u32;
@@ -36,7 +36,7 @@ pub fn compose<C: std::ops::Deref<Target = [u8]>>(
             px(p.dst.0 + p.src.w),
             px(p.dst.1 + p.src.h),
         ];
-        crate::annotate::rasterize_clipped(&mut image, shapes, origin, scale as f32, clip);
+        drawings.rasterize(&mut image, origin, scale as f32, clip);
     }
     Ok(image)
 }
@@ -50,10 +50,7 @@ pub fn run(request: &Request, dir: &Path) -> Result<crate::save::Saved> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        annotate::Tool,
-        capture::{self, Rect, Shot},
-    };
+    use crate::capture::{self, Rect, Shot};
     use image::Rgba;
 
     /// One white monitor at (0,0) 100x50 logical, 2 px per logical px.
@@ -67,27 +64,50 @@ mod tests {
         .unwrap()
     }
 
-    fn red_line(from: (f32, f32), to: (f32, f32)) -> Shape {
-        Shape {
-            tool: Tool::Line,
-            points: vec![from, to],
-            color: [255, 0, 0, 255],
-            width: 2.,
-            ..Shape::default()
+    /// Stand-in drawings: red desktop rectangles.
+    struct Fill(Vec<Rect>);
+
+    impl Fill {
+        fn covers(&self, (x, y): (f32, f32)) -> bool {
+            let inside = |r: &Rect| {
+                (r.x as f32..r.right() as f32).contains(&x) && (r.y as f32..(r.y + r.h) as f32).contains(&y)
+            };
+            self.0.iter().any(inside)
+        }
+    }
+
+    impl Drawings for Fill {
+        fn rasterize(&self, image: &mut RgbaImage, origin: (f32, f32), scale: f32, clip: [u32; 4]) {
+            for py in clip[1]..clip[3].min(image.height()) {
+                for px in clip[0]..clip[2].min(image.width()) {
+                    let desktop = (px as f32 / scale + origin.0, py as f32 / scale + origin.1);
+                    if self.covers(desktop) {
+                        image.put_pixel(px, py, Rgba([255, 0, 0, 255]));
+                    }
+                }
+            }
+        }
+
+        fn extents(&self) -> Vec<Rect> {
+            self.0.clone()
+        }
+
+        fn view(&self, _: Rect, _: &mut gpui::App) -> gpui::AnyView {
+            unreachable!("composing an image never asks for a view")
         }
     }
 
     #[test]
     fn region_gets_shapes_at_output_density() {
-        let shapes = [red_line((10., 20.), (30., 20.))];
+        let line = Fill(vec![Rect::new(10, 19, 20, 2)]);
         let img = compose(
             &hidpi_white(),
             &Request::Region(Rect::new(10, 10, 20, 20)),
-            &shapes,
+            Some(&line),
         )
         .unwrap();
         assert_eq!(img.dimensions(), (40, 40));
-        // Logical y = 20 is pixel row 20 of the cut; the 2-logical-px stroke is 4 px thick.
+        // Logical y = 19..21 is pixel rows 18..22 of the cut: 2 logical px are 4 px.
         for y in [18, 19, 20, 21] {
             assert_eq!(img.get_pixel(20, y).0, [255, 0, 0, 255], "row {y}");
         }
@@ -103,12 +123,17 @@ mod tests {
             image: RgbaImage::from_pixel(100, 50, Rgba([255; 4])),
         };
         let snap = Snapshot::new(vec![white("A", 0), white("B", 100), white("C", 200)]).unwrap();
-        let shapes = [
-            red_line((210., 25.), (290., 25.)), // on C
-            red_line((150., 10.), (160., 10.)), // on B, not picked
-            red_line((90., 40.), (130., 40.)),  // from A into B
-        ];
-        let img = compose(&snap, &Request::Screens(vec!["A".into(), "C".into()]), &shapes).unwrap();
+        let lines = Fill(vec![
+            Rect::new(210, 24, 80, 2), // on C
+            Rect::new(150, 9, 10, 2),  // on B, not picked
+            Rect::new(90, 39, 40, 2),  // from A into B
+        ]);
+        let img = compose(
+            &snap,
+            &Request::Screens(vec!["A".into(), "C".into()]),
+            Some(&lines),
+        )
+        .unwrap();
         assert_eq!(img.dimensions(), (200, 50));
         let red = [255, 0, 0, 255];
         assert_eq!(img.get_pixel(150, 25).0, red, "C's line lands in C's half");
@@ -135,7 +160,7 @@ mod tests {
         }])
         .unwrap();
         for request in [Request::Region(Rect::new(0, 0, 2, 1)), Request::Screens(vec![])] {
-            let img = compose(&snap, &request, &[]).unwrap();
+            let img = compose(&snap, &request, None).unwrap();
             assert_eq!(img.into_raw(), vec![3, 2, 1, 255, 6, 5, 4, 255]);
         }
     }
@@ -146,7 +171,7 @@ mod tests {
         let request = Request::Region(Rect::new(10, 10, 20, 20));
         let mut cut = snap.grab(&request).unwrap();
         crate::capture::swap_red_blue(&mut cut);
-        assert_eq!(compose(&snap, &request, &[]).unwrap(), cut);
+        assert_eq!(compose(&snap, &request, None).unwrap(), cut);
     }
 
     #[test]

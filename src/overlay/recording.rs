@@ -7,17 +7,17 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui::{AnyWindowHandle, App};
 
-use crate::annotate::Shape;
+use crate::drawings::Shared;
 
 /// What to show for a recording.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[cfg_attr(
     not(all(target_os = "linux", feature = "wayland")),
     expect(dead_code, reason = "the frame needs layer-shell")
 )]
 pub struct Spec {
     pub on_screen: crate::record::OnScreen,
-    pub shapes: Vec<Shape>,
+    pub drawings: Option<Shared>,
 }
 
 /// Without layer-shell there is no click-through window: no frame.
@@ -46,19 +46,15 @@ pub use view::{display_of, layer_options, show};
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod view {
-    use std::{collections::HashMap, sync::Arc};
-
     use gpui::{
-        AnyWindowHandle, App, Bounds, Context, DisplayId, Hsla, ImageSource, ObjectFit, Point, RenderImage,
-        Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, canvas, div, img,
-        prelude::*, px, size,
+        AnyView, AnyWindowHandle, App, Bounds, Context, DisplayId, Hsla, Point, Window,
+        WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size,
     };
 
     use super::{Shown, Spec};
     use crate::{
-        annotate::{Shape, Tool},
         capture::{MonitorInfo, Rect},
-        overlay::{controls, layout, tools},
+        overlay::{controls, layout},
         record::frame::{self, Surface},
     };
 
@@ -69,31 +65,17 @@ mod view {
         a: 0.95,
     };
 
-    /// Room a drawing takes on screen: its points, plus what its stroke, arrow head or disc adds.
-    fn shape_rect(shape: &Shape) -> Rect {
-        let (l, t, r, b) = shape.bounds();
-        let pad = if shape.tool == Tool::Text {
-            0.
-        } else {
-            shape.width.mul_add(4., 4.)
-        };
-        Rect::new(
-            (l - pad).floor() as i32,
-            (t - pad).floor() as i32,
-            2.0f32.mul_add(pad, r - l).ceil() as i32,
-            2.0f32.mul_add(pad, b - t).ceil() as i32,
-        )
-    }
-
     /// Open the frame (and drawings) for `spec`, and the strips that open the controls.
     pub fn show(spec: &Spec, cx: &mut App) -> Shown {
         let on_screen = &spec.on_screen;
-        let extra: Vec<Rect> = spec.shapes.iter().map(shape_rect).collect();
+        let extra = spec
+            .drawings
+            .as_ref()
+            .map_or_else(Vec::new, |drawn| drawn.extents());
         let surfaces = frame::surfaces(&on_screen.areas, &extra, &on_screen.monitors);
-        let shapes: Arc<[Shape]> = spec.shapes.clone().into();
         let mut shown = Shown::default();
         for surface in surfaces {
-            match open_frame(&surface, &on_screen.monitors, shapes.clone(), cx) {
+            match open_frame(&surface, &on_screen.monitors, spec, cx) {
                 Ok(handle) => shown.windows.push(handle),
                 Err(e) => eprintln!(
                     "screencapture: recording frame on {}: {e:#}",
@@ -106,7 +88,6 @@ mod view {
         shown
     }
 
-    /// The gpui display showing `screen`.
     pub fn display_of(screen: &MonitorInfo, monitors: &[MonitorInfo], cx: &App) -> Option<DisplayId> {
         let shows_screen = |display: &std::rc::Rc<dyn gpui::PlatformDisplay>| {
             let origin = display.bounds().origin;
@@ -154,85 +135,45 @@ mod view {
     fn open_frame(
         surface: &Surface,
         monitors: &[MonitorInfo],
-        shapes: Arc<[Shape]>,
+        spec: &Spec,
         cx: &mut App,
     ) -> anyhow::Result<AnyWindowHandle> {
         let display = display_of(&surface.monitor, monitors, cx)
             .ok_or_else(|| anyhow::anyhow!("no display shows it"))?;
         let options = layer_options(surface.bounds, surface.monitor.rect, display);
         let surface = surface.clone();
+        let drawings = spec.drawings.clone();
         let handle = cx.open_window(options, move |window, cx| {
             // Every click goes through to what is underneath.
             window.set_input_region(Some(&[]));
-            cx.new(|_| FrameView {
-                surface,
-                shapes,
-                texts: HashMap::new(),
-            })
+            let drawings = drawings.map(|drawn| drawn.view(surface.bounds, cx));
+            cx.new(|_| FrameView { surface, drawings })
         })?;
         Ok(handle.into())
     }
 
     struct FrameView {
         surface: Surface,
-        shapes: Arc<[Shape]>,
-        texts: HashMap<tools::TextKey, Arc<RenderImage>>,
+        /// The drawings on this window, under the frame.
+        drawings: Option<AnyView>,
     }
 
     impl Render for FrameView {
-        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let b = self.surface.bounds;
-            let mut root = div().size_full().relative();
-            // Drawings first, the frame on top.
-            let origin = (b.x, b.y);
-            let scale = window.scale_factor();
-            for shape in self.shapes.iter() {
-                if shape.tool == Tool::Text {
-                    let r = shape_rect(shape);
-                    if r.intersect(b).is_none() {
-                        continue;
-                    }
-                    let key = tools::TextKey::new(shape, scale);
-                    let image = self
-                        .texts
-                        .entry(key)
-                        .or_insert_with_key(tools::TextKey::render)
-                        .clone();
-                    root = root.child(
-                        img(ImageSource::Render(image))
-                            .absolute()
-                            .left(px((r.x - b.x) as f32))
-                            .top(px((r.y - b.y) as f32))
-                            .w(px(r.w as f32))
-                            .h(px(r.h as f32))
-                            .object_fit(ObjectFit::Fill),
-                    );
-                } else {
-                    let shape = shape.clone();
-                    root = root.child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, (), window, _| {
-                                tools::paint_shapes(std::slice::from_ref(&shape), origin, bounds, window);
-                            },
-                        )
-                        .absolute()
-                        .size_full(),
-                    );
-                }
-            }
-            for strip in &self.surface.strips {
-                root = root.child(
-                    div()
-                        .absolute()
-                        .left(px(strip.x as f32))
-                        .top(px(strip.y as f32))
-                        .w(px(strip.w as f32))
-                        .h(px(strip.h as f32))
-                        .bg(RED),
-                );
-            }
-            root
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let strips = self.surface.strips.iter().map(|strip| {
+                div()
+                    .absolute()
+                    .left(px(strip.x as f32))
+                    .top(px(strip.y as f32))
+                    .w(px(strip.w as f32))
+                    .h(px(strip.h as f32))
+                    .bg(RED)
+            });
+            div()
+                .size_full()
+                .relative()
+                .children(self.drawings.clone())
+                .children(strips)
         }
     }
 }

@@ -14,6 +14,7 @@ mod actions;
 mod controls;
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod drawer;
+mod drawn;
 mod folder;
 #[cfg(unix)]
 mod gate;
@@ -679,7 +680,7 @@ impl Overlay {
         }
         trace("selection done");
         self.phase = Phase::Saving;
-        let shapes: Vec<Shape> = self.annotations.shapes().cloned().collect();
+        let drawings = drawn::Drawn::of(self.annotations.shapes());
         let screens = self.screens.clone();
         let dir = self.config.screenshots.dir(None);
         let entity = cx.entity();
@@ -692,7 +693,7 @@ impl Overlay {
         cx.spawn(async move |_, cx| {
             let saved = cx
                 .background_spawn(async move {
-                    let image = job::compose(&borrowed(&screens)?, &request, &shapes)?;
+                    let image = job::compose(&borrowed(&screens)?, &request, drawings.as_deref())?;
                     trace("composed");
                     let saved = crate::save::save_png(&image, &dir, chrono::Local::now())?;
                     trace("saved");
