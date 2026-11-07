@@ -1,7 +1,15 @@
 //! End-to-end runs of the real binary against the live desktop:
 //! `cargo test -- --ignored` inside a Wayland (wlroots) session.
 
+// The virtual pointer is a wlroots Wayland protocol.
+#[cfg(feature = "wayland")]
+#[path = "support/pointer.rs"]
+mod pointer;
+
 use std::{path::Path, process::Command};
+
+#[cfg(feature = "wayland")]
+use pointer::{Pointer, Spot};
 
 fn bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_screencapture"));
@@ -125,6 +133,11 @@ fn redaction_and_text_are_saved() {
 struct Session {
     runtime: std::path::PathBuf,
     config: std::path::PathBuf,
+    #[cfg_attr(
+        not(feature = "wayland"),
+        expect(dead_code, reason = "only the drawer tests look there")
+    )]
+    videos: std::path::PathBuf,
 }
 
 impl Session {
@@ -134,11 +147,16 @@ impl Session {
         let private = std::os::unix::fs::PermissionsExt::from_mode(0o700);
         std::fs::set_permissions(&runtime, private).expect("a fresh temporary folder can be made private");
         let config = fresh_dir();
-        let settings = format!(r#"{{"video_dir":{:?}}}"#, fresh_dir());
+        let videos = fresh_dir();
+        let settings = format!(r#"{{"video_dir":{videos:?}}}"#);
         std::fs::create_dir_all(config.join("screencapture")).expect("temporary folders are writable");
         std::fs::write(config.join("screencapture/config.json"), settings)
             .expect("temporary folders are writable");
-        Self { runtime, config }
+        Self {
+            runtime,
+            config,
+            videos,
+        }
     }
 
     /// The binary, in this session.
@@ -280,4 +298,112 @@ fn recording_every_screen_makes_one_video_wider_than_any_screen() {
     let video = saved_path(&stopped);
     let _ = recording.wait_with_output();
     assert!(last_frame(&video).width() > widest_screen());
+}
+
+#[cfg(feature = "wayland")]
+mod drawer {
+    use super::*;
+
+    /// A screen as `screencapture list` prints it (`name<TAB>x,y WxH`).
+    struct Screen {
+        name: String,
+        x: u32,
+        width: u32,
+    }
+
+    fn screens() -> Vec<Screen> {
+        let listed = bin().arg("list").output().expect("the binary under test runs");
+        let text = String::from_utf8(listed.stdout).expect("screen names are text");
+        text.lines().filter_map(parse_screen).collect()
+    }
+
+    fn parse_screen(line: &str) -> Option<Screen> {
+        let (name, geometry) = line.split_once('\t')?;
+        let (position, size) = geometry.split_once(' ')?;
+        let x = position.split_once(',')?.0.parse().ok()?;
+        let width = size.split_once('x')?.0.parse().ok()?;
+        Some(Screen {
+            name: name.into(),
+            x,
+            width,
+        })
+    }
+
+    /// The desktop's extent, for absolute pointer moves.
+    fn layout() -> (u32, u32) {
+        let right = screens()
+            .iter()
+            .map(|s| s.x + s.width)
+            .max()
+            .expect("at least one screen");
+        (right, 1440)
+    }
+
+    /// Record the first screen from the command line, open the drawer with the pointer, and click
+    /// at `offset` px right of its centre. The recording process.
+    fn click_in_drawer(session: &Session, offset: u32) -> std::process::Child {
+        let screen = screens().into_iter().next().expect("at least one screen");
+        let recording = session
+            .command()
+            .args(["record", "screen", &screen.name])
+            .spawn()
+            .expect("the binary under test runs");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let centre = screen.x + screen.width / 2;
+        let mut pointer = Pointer::new(layout());
+        pointer.glide(Spot { x: centre, y: 300 }, Spot { x: centre, y: 0 });
+        // Rest on the strip until the drawer is open.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        pointer.glide(
+            Spot { x: centre, y: 0 },
+            Spot {
+                x: centre + offset,
+                y: 27,
+            },
+        );
+        pointer.click();
+        recording
+    }
+
+    /// Where the drawer's buttons are, right of its centre, with the default settings' summary.
+    const STOP_BUTTON: u32 = 63;
+    const DISCARD_BUTTON: u32 = 150;
+
+    /// Whether `process` ends within a few seconds.
+    fn ends_soon(process: &mut std::process::Child) -> bool {
+        for _ in 0..50 {
+            if process
+                .try_wait()
+                .expect("the process can be waited on")
+                .is_some()
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = process.kill();
+        false
+    }
+
+    #[test]
+    #[ignore = "needs a wlroots session and gpu-screen-recorder; moves the pointer and records"]
+    fn the_drawer_stops_the_recording() {
+        let session = Session::new();
+        let mut recording = click_in_drawer(&session, STOP_BUTTON);
+        assert!(ends_soon(&mut recording), "the recording went on");
+    }
+
+    #[test]
+    #[ignore = "needs a wlroots session and gpu-screen-recorder; moves the pointer and records"]
+    fn the_drawer_discards_the_recording() {
+        let session = Session::new();
+        let mut recording = click_in_drawer(&session, DISCARD_BUTTON);
+        let _ = ends_soon(&mut recording);
+        assert_eq!(
+            std::fs::read_dir(&session.videos)
+                .expect("the folder exists")
+                .count(),
+            0
+        );
+    }
 }

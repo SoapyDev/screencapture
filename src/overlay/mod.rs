@@ -10,6 +10,10 @@
 //! the daemon it is the only work done before the windows open.
 
 mod actions;
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+mod controls;
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+mod drawer;
 #[cfg(unix)]
 mod gate;
 mod keys;
@@ -204,7 +208,7 @@ enum ToUi {
     /// Show the frame for this recorded area on these screens, replacing any other; `None`
     /// removes it.
     #[cfg(target_os = "linux")]
-    Frame(Option<(Vec<Rect>, Vec<MonitorInfo>)>),
+    Frame(Option<crate::record::OnScreen>),
 }
 
 /// How often the daemon checks on a running recorder (it may quit by itself).
@@ -247,10 +251,7 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
             #[cfg(target_os = "linux")]
             let send_frame = |recorder: &crate::record::Recorder| {
                 // Owned only here, to cross to the UI thread.
-                let frame = recorder
-                    .frame()
-                    .map(|(areas, monitors)| (areas.to_vec(), monitors.to_vec()));
-                let _ = tx.unbounded_send(ToUi::Frame(frame));
+                let _ = tx.unbounded_send(ToUi::Frame(recorder.frame().cloned()));
             };
             // While recording: notice a recorder that quit by itself, and take its frame down.
             #[cfg(target_os = "linux")]

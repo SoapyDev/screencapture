@@ -9,9 +9,8 @@ use gpui::{App, AppContext, Global};
 use super::recording::{self, Shown, Spec};
 use crate::{
     annotate::Shape,
-    capture::{MonitorInfo, Rect},
     daemon::{self, Pending, Reply, Request},
-    record::{command::Command, foreground::ShowFrame},
+    record::{OnScreen, command::Command, foreground::ShowFrame},
 };
 
 /// Drawings made in the overlay, waiting for the frame of the recording it started (UI thread).
@@ -30,11 +29,9 @@ pub fn take_drawings(cx: &mut App) -> Vec<Shape> {
 }
 
 /// The frame's spec for `frame` (from the recorder), with the drawings waiting for it.
-pub fn spec_for(frame: Option<(Vec<Rect>, Vec<MonitorInfo>)>, cx: &mut App) -> Option<Spec> {
-    let (areas, monitors) = frame?;
+pub fn spec_for(frame: Option<OnScreen>, cx: &mut App) -> Option<Spec> {
     Some(Spec {
-        areas,
-        monitors,
+        on_screen: frame?,
         shapes: take_drawings(cx),
     })
 }
@@ -86,8 +83,7 @@ pub fn drive_frames(drawings: Vec<Shape>, work: impl FnOnce(ShowFrame) + Send + 
     std::thread::spawn(move || {
         work(&mut |frame| {
             // Owned only here, to cross to the UI thread.
-            let frame = frame.map(|(areas, monitors)| (areas.to_vec(), monitors.to_vec()));
-            let _ = tx.unbounded_send(Some(frame));
+            let _ = tx.unbounded_send(Some(frame.cloned()));
         });
         let _ = tx.unbounded_send(None);
     });

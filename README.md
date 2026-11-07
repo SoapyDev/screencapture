@@ -129,6 +129,7 @@ screencapture record screen DP-1              # a named screen
 screencapture record region -g "100,200 640x480"
 screencapture record all                      # every screen, joined into one video
 screencapture record stop                     # finish; prints the file
+screencapture record discard                  # stop and throw the recording away
 screencapture record toggle                   # start the focused screen, or stop: one key for both
 ```
 
@@ -159,6 +160,11 @@ Settings, remembered under `"record"` in the config file and overridable per rec
   finer, since joining encodes once more. Joining runs on the GPU (NVENC) when it can, else in
   software; it takes time: about 180 frames a second for two 1440p screens on an RTX 5080, so
   roughly 45 s to save a minute recorded at 144 fps.
+- While recording, push the pointer to the top edge of any screen, at its middle: after a brief
+  rest a drawer slides down with the time recorded, what is recorded, **■ Stop** and
+  **✕ Discard**. It closes once the pointer leaves it. It takes no keyboard (your apps keep it;
+  key bindings use `record stop` / `record discard`), and recording never pauses: on a recorded
+  screen, the drawer is in the video while it is open.
 - A red frame around the recorded area shows that a recording runs. It sits just outside the
   area, so it is never in the video; where the area touches a screen edge with no screen beyond
   it, a 3 px band is left out of the recording to make room for it. The frame takes no clicks

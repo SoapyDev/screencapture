@@ -20,6 +20,8 @@ pub enum Outcome {
         notes: Vec<String>,
     },
     Saved(PathBuf),
+    /// Stopped and thrown away.
+    Discarded,
     /// A start while this one runs.
     AlreadyRecording(PathBuf),
     NotRecording,
@@ -37,11 +39,22 @@ pub trait Env {
     fn start(&mut self, plan: Plan, dir: &Path) -> Result<Session>;
 }
 
+/// What stays on screen while recording: the frame around the recorded parts, and the controls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnScreen {
+    /// The recorded parts, one per screen.
+    pub areas: Vec<Rect>,
+    /// The screens when the recording started.
+    pub monitors: Vec<MonitorInfo>,
+    /// What is recorded, for the controls (see [`Plan::summary`]).
+    pub summary: String,
+}
+
 #[derive(Default)]
 pub struct Recorder {
     active: Option<Session>,
-    /// Recorded areas (one per screen) and the screens then, while recording.
-    frame: Option<(Vec<Rect>, Vec<MonitorInfo>)>,
+    /// What is on screen, while recording.
+    frame: Option<OnScreen>,
 }
 
 impl Recorder {
@@ -50,7 +63,8 @@ impl Recorder {
         match (command, running) {
             // A recorder that quit by itself is still stopped: what it saved is reported.
             (Command::Stop | Command::Toggle(..), Some(_)) => self.stop(),
-            (Command::Stop, None) => Outcome::NotRecording,
+            (Command::Stop | Command::Discard, None) => Outcome::NotRecording,
+            (Command::Discard, Some(_)) => self.discard(),
             (Command::Start(..), Some(true)) => {
                 Outcome::AlreadyRecording(self.recording().map_or_else(Default::default, Path::to_path_buf))
             }
@@ -68,7 +82,13 @@ impl Recorder {
             let (plan, dir, monitors) = plan_for(target, overrides, env)?;
             let notes = plan.notes.clone();
             let areas = plan.parts.iter().map(|part| part.job.area).collect();
-            anyhow::Ok((env.start(plan, &dir)?, notes, (areas, monitors)))
+            let summary = plan.summary();
+            let on_screen = OnScreen {
+                areas,
+                monitors,
+                summary,
+            };
+            anyhow::Ok((env.start(plan, &dir)?, notes, on_screen))
         })();
         match started {
             Ok((session, notes, frame)) => {
@@ -90,10 +110,17 @@ impl Recorder {
         }
     }
 
+    fn discard(&mut self) -> Outcome {
+        self.frame = None;
+        if let Some(session) = self.active.take() {
+            session.cancel();
+        }
+        Outcome::Discarded
+    }
+
     /// The recorded area and the screens around it, for the frame shown while recording.
-    pub fn frame(&self) -> Option<(&[Rect], &[MonitorInfo])> {
-        let (areas, monitors) = self.frame.as_ref()?;
-        Some((areas, monitors))
+    pub const fn frame(&self) -> Option<&OnScreen> {
+        self.frame.as_ref()
     }
 
     /// The file being recorded, if a recording runs.
@@ -164,6 +191,7 @@ impl Outcome {
                 vec![format!("already recording to {}", path.display())],
             ),
             Self::NotRecording => (Reply::NotRecording, Vec::new()),
+            Self::Discarded => (Reply::Cancelled, Vec::new()),
             Self::Failed(message) => (Reply::Error(message), Vec::new()),
         }
     }
@@ -284,8 +312,19 @@ mod tests {
         let mut env = Fake::new();
         let mut r = Recorder::default();
         r.run(start(), &mut env);
-        let (areas, _) = r.frame().expect("a recording runs");
-        assert_eq!(areas, [env.jobs[0].area]);
+        let on_screen = r.frame().expect("a recording runs");
+        assert_eq!(on_screen.areas, [env.jobs[0].area]);
+    }
+
+    #[test]
+    fn the_frame_says_what_is_recorded() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        r.run(start(), &mut env);
+        assert_eq!(
+            r.frame().expect("a recording runs").summary,
+            "MP4 · AV1 · 144 fps"
+        );
     }
 
     #[test]
@@ -295,6 +334,47 @@ mod tests {
         r.run(start(), &mut env);
         r.run(Command::Stop, &mut env);
         assert_eq!(r.frame(), None);
+    }
+
+    #[test]
+    fn discarding_reports_it() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        r.run(start(), &mut env);
+        assert_eq!(r.run(Command::Discard, &mut env), Outcome::Discarded);
+    }
+
+    #[test]
+    fn discarding_leaves_no_file() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        let Outcome::Started { path, .. } = r.run(start(), &mut env) else {
+            panic!("the fake recorder starts");
+        };
+        r.run(Command::Discard, &mut env);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn discarding_ends_the_recording() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        r.run(start(), &mut env);
+        r.run(Command::Discard, &mut env);
+        assert_eq!(r.recording(), None);
+    }
+
+    #[test]
+    fn discard_without_a_recording() {
+        assert_eq!(
+            Recorder::default().run(Command::Discard, &mut Fake::new()),
+            Outcome::NotRecording
+        );
+    }
+
+    #[test]
+    fn a_discarded_recording_answers_cancelled() {
+        assert_eq!(Outcome::Discarded.reply().0, Reply::Cancelled);
     }
 
     #[test]

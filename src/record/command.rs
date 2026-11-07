@@ -7,6 +7,8 @@ use crate::capture::Rect;
 pub enum Command {
     Start(Target, Overrides),
     Stop,
+    /// Stop and throw the recording away.
+    Discard,
     /// Start if idle, else stop.
     Toggle(Target, Overrides),
 }
@@ -16,6 +18,7 @@ impl Command {
     pub fn encode(&self) -> String {
         let (verb, target, overrides) = match self {
             Self::Stop => return "stop".into(),
+            Self::Discard => return "discard".into(),
             Self::Start(target, overrides) => ("start", target, overrides),
             Self::Toggle(target, overrides) => ("toggle", target, overrides),
         };
@@ -35,8 +38,11 @@ impl Command {
     pub fn parse(text: &str) -> Option<Self> {
         let mut words = text.split_whitespace();
         let verb = words.next()?;
-        if verb == "stop" {
-            return words.next().is_none().then_some(Self::Stop);
+        let alone = |command| words.clone().next().is_none().then_some(command);
+        match verb {
+            "stop" => return alone(Self::Stop),
+            "discard" => return alone(Self::Discard),
+            _ => {}
         }
         let target = match words.next()? {
             "focused" => Target::Focused,
@@ -71,7 +77,7 @@ impl Command {
 
     /// Whether this would start a recording if none runs.
     pub const fn starts(&self) -> bool {
-        !matches!(self, Self::Stop)
+        !matches!(self, Self::Stop | Self::Discard)
     }
 }
 
@@ -102,6 +108,16 @@ mod tests {
             assert!(!line.contains('\n'));
             assert_eq!(Command::parse(&line), Some(command), "{line}");
         }
+    }
+
+    #[test]
+    fn discard_round_trips() {
+        assert_eq!(Command::parse(&Command::Discard.encode()), Some(Command::Discard));
+    }
+
+    #[test]
+    fn discard_starts_nothing() {
+        assert!(!Command::Discard.starts());
     }
 
     #[test]

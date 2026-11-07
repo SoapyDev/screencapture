@@ -203,7 +203,11 @@ fn report_record(answer: anyhow::Result<daemon::Answer>) -> ExitCode {
             eprintln!("screencapture: {e}");
             ExitCode::FAILURE
         }
-        Reply::Cancelled => ExitCode::FAILURE,
+        // Only a discarded recording answers this way.
+        Reply::Cancelled => {
+            eprintln!("screencapture: recording discarded");
+            ExitCode::SUCCESS
+        }
     }
 }
 

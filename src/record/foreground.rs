@@ -16,7 +16,7 @@ use super::{Env, Outcome, Recorder, command::Command};
 use crate::daemon::{self, Reply, Request};
 
 /// The recorded areas (one per screen) and the screens, while recording; `None` once it ended.
-pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<(&[crate::capture::Rect], &[crate::capture::MonitorInfo])>);
+pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<&super::OnScreen>);
 
 /// Record `command` (a start), in this process, until told to stop. Prints how to stop it.
 pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Result<Outcome> {
@@ -71,6 +71,7 @@ fn serve(listener: &UnixListener, recorder: &mut Recorder, env: &mut impl Env, s
         let (outcome, ends) = match pending.request.clone() {
             Request::Record(command @ Command::Start(..)) => (recorder.run(command, env), false),
             Request::Record(Command::Stop | Command::Toggle(..)) => (recorder.run(Command::Stop, env), true),
+            Request::Record(Command::Discard) => (recorder.run(Command::Discard, env), true),
             Request::Overlay(_) => {
                 pending.reply(&Reply::Recording(
                     recorder
@@ -153,6 +154,15 @@ mod tests {
         // SIGHUP: SIGINT would also reach a terminal's test runner if this went wrong.
         signal_hook::low_level::raise(signal_hook::consts::SIGHUP).unwrap();
         assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_discard_request_ends_it() {
+        let (_dir, socket, listener, mut recorder, mut env) = recording();
+        let client = std::thread::spawn(move || daemon::send(&socket, &Request::Record(Command::Discard)));
+        let outcome = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        let _ = client.join();
+        assert_eq!(outcome, Outcome::Discarded);
     }
 
     #[test]

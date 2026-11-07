@@ -63,6 +63,8 @@ pub enum RecordWhat {
     },
     /// Stop the recording and save it.
     Stop,
+    /// Stop the recording and throw it away.
+    Discard,
     /// Record the focused screen, or stop if a recording runs: one key for both.
     Toggle,
 }
@@ -104,6 +106,7 @@ fn record_command(what: Option<&RecordWhat>, overrides: Overrides) -> RecordComm
         Some(RecordWhat::All) => Target::All,
         Some(RecordWhat::Region { geometry }) => Target::Region(*geometry),
         Some(RecordWhat::Stop) => return RecordCommand::Stop,
+        Some(RecordWhat::Discard) => return RecordCommand::Discard,
     };
     match what {
         Some(RecordWhat::Toggle) => RecordCommand::Toggle(target, overrides),
@@ -174,6 +177,7 @@ mod tests {
             start(Target::Region(Rect::new(10, 20, 300, 400)))
         );
         assert_eq!(plan(&["record", "stop"]), Plan::Record(RecordCommand::Stop));
+        assert_eq!(plan(&["record", "discard"]), Plan::Record(RecordCommand::Discard));
         assert_eq!(
             plan(&["record", "toggle"]),
             Plan::Record(RecordCommand::Toggle(Target::Focused, Overrides::default()))

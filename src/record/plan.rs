@@ -78,6 +78,26 @@ pub struct Plan {
     pub notes: Vec<String>,
 }
 
+impl Plan {
+    /// What is recorded, in a few words, for the controls: `MP4 · AV1 · 60 fps · 3 screens`.
+    pub fn summary(&self) -> String {
+        let first = &self.parts[0].job;
+        let (codec, fps, gif) = self.join.map_or((first.codec, first.fps, first.gif), |join| {
+            (join.codec, join.fps, join.gif)
+        });
+        let format = if gif {
+            "GIF".to_string()
+        } else {
+            format!("MP4 · {}", codec.label())
+        };
+        let screens = match self.parts.len() {
+            1 => String::new(),
+            count => format!(" · {count} screens"),
+        };
+        format!("{format} · {fps} fps{screens}")
+    }
+}
+
 /// One screen's recording, and where it lands in the joined video (video px).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartJob {
@@ -782,6 +802,31 @@ mod tests {
         assert_eq!(
             single(&planned(&Target::Focused, with_format(Format::Gif), &three())).codec,
             Codec::H264
+        );
+    }
+
+    #[test]
+    fn a_summary_names_the_format_and_rate() {
+        assert_eq!(
+            planned(&Target::Focused, Settings::default(), &three()).summary(),
+            "MP4 · AV1 · 60 fps"
+        );
+    }
+
+    #[test]
+    fn a_gif_summary_says_gif() {
+        assert_eq!(
+            planned(&Target::Focused, with_format(Format::Gif), &three()).summary(),
+            "GIF · 25 fps"
+        );
+    }
+
+    #[test]
+    fn a_summary_counts_several_screens() {
+        assert!(
+            planned(&Target::All, Settings::default(), &three())
+                .summary()
+                .ends_with(" · 3 screens")
         );
     }
 

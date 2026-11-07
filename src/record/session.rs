@@ -69,6 +69,16 @@ impl Session {
         self.parts.iter_mut().all(|(active, _)| active.alive())
     }
 
+    /// Stop and throw the recording away.
+    pub fn cancel(self) {
+        for (active, _) in self.parts {
+            active.cancel();
+        }
+        if self.join.is_some() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     /// Finish the file and return its path.
     pub fn stop(self) -> Result<PathBuf> {
         let Some(join) = self.join else {

@@ -1,88 +1,45 @@
-//! Test driver: real pointer input through `zwlr_virtual_pointer_v1`, for checking the overlay
-//! the way a user drives it.
+//! Test driver: real pointer input, for checking the program the way a user drives it.
 //!
 //! `cargo run --example drive -- W H drag X1 Y1 X2 Y2` drags with the left button across a
-//! W×H layout (all monitors), in layout pixels.
+//! W×H layout (all monitors), in layout pixels; `glide` instead of `drag` moves the same way
+//! without the button, `click` glides then clicks at the end, and `W H move X Y` jumps the
+//! pointer there.
 
-use std::time::Duration;
+#[path = "../tests/support/pointer.rs"]
+mod pointer;
 
-use wayland_client::{
-    Connection, Dispatch, QueueHandle,
-    protocol::{wl_pointer, wl_registry, wl_seat},
-};
-use wayland_protocols_wlr::virtual_pointer::v1::client::{
-    zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
-    zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
-};
-
-#[derive(Default)]
-struct State {
-    seat: Option<wl_seat::WlSeat>,
-    manager: Option<ZwlrVirtualPointerManagerV1>,
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for State {
-    fn event(
-        s: &mut Self,
-        r: &wl_registry::WlRegistry,
-        e: wl_registry::Event,
-        (): &(),
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global { name, interface, .. } = e {
-            match interface.as_str() {
-                "wl_seat" => s.seat = Some(r.bind(name, 1, qh, ())),
-                "zwlr_virtual_pointer_manager_v1" => s.manager = Some(r.bind(name, 1, qh, ())),
-                _ => {}
-            }
-        }
-    }
-}
-
-wayland_client::delegate_noop!(State: ignore wl_seat::WlSeat);
-wayland_client::delegate_noop!(State: ZwlrVirtualPointerManagerV1);
-wayland_client::delegate_noop!(State: ZwlrVirtualPointerV1);
-
-const BTN_LEFT: u32 = 0x110;
+use pointer::{Pointer, Spot};
 
 fn main() {
-    let args: Vec<u32> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
-    let [w, h, x1, y1, x2, y2] = args[..] else {
-        panic!("usage: drive W H drag X1 Y1 X2 Y2");
-    };
-    let conn = Connection::connect_to_env().expect("wayland");
-    let mut queue = conn.new_event_queue();
-    let qh = queue.handle();
-    conn.display().get_registry(&qh, ());
-    let mut state = State::default();
-    queue
-        .roundtrip(&mut state)
-        .expect("the compositor answers the registry");
-    let manager = state
-        .manager
-        .as_ref()
-        .expect("no zwlr_virtual_pointer_manager_v1");
-    let pointer = manager.create_virtual_pointer(state.seat.as_ref(), &qh, ());
-    let mut time = 0;
-    let mut step = |f: &dyn Fn(u32)| {
-        time += 16;
-        f(time);
-        pointer.frame();
-        conn.flush().expect("the compositor connection stays open");
-        std::thread::sleep(Duration::from_millis(16));
-    };
-    step(&|t| pointer.motion_absolute(t, x1, y1, w, h));
-    step(&|t| pointer.button(t, BTN_LEFT, wl_pointer::ButtonState::Pressed));
-    let steps = 30;
-    for i in 1..=steps {
-        let x = x1 + (x2 - x1) * i / steps;
-        let y = y1 + (y2 - y1) * i / steps;
-        step(&|t| pointer.motion_absolute(t, x, y, w, h));
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    let numbers: Vec<u32> = words.iter().filter_map(|word| word.parse().ok()).collect();
+    let gesture = words
+        .iter()
+        .find(|word| word.parse::<u32>().is_err())
+        .map_or("move", String::as_str);
+    match (gesture, &numbers[..]) {
+        ("move", &[w, h, x, y]) => Pointer::new((w, h)).jump(Spot { x, y }),
+        (gesture, &[w, h, x1, y1, x2, y2]) => {
+            run(gesture, (w, h), Spot { x: x1, y: y1 }, Spot { x: x2, y: y2 });
+        }
+        _ => panic!("usage: drive W H drag|glide|click X1 Y1 X2 Y2 | drive W H move X Y"),
     }
-    step(&|t| pointer.button(t, BTN_LEFT, wl_pointer::ButtonState::Released));
-    pointer.destroy();
-    queue
-        .roundtrip(&mut state)
-        .expect("the compositor takes the last events");
+}
+
+fn run(gesture: &str, layout: (u32, u32), from: Spot, to: Spot) {
+    let mut pointer = Pointer::new(layout);
+    pointer.jump(from);
+    match gesture {
+        "drag" => {
+            pointer.press();
+            pointer.glide(from, to);
+            pointer.release();
+        }
+        "glide" => pointer.glide(from, to),
+        "click" => {
+            pointer.glide(from, to);
+            pointer.click();
+        }
+        other => panic!("unknown gesture {other:?}: drag, glide, click or move"),
+    }
 }
