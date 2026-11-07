@@ -189,6 +189,34 @@ pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, 
 }
 
 /// Resident mode: initialise the GPU once, then open an overlay per client request.
+/// Run the recording `command` that `client` sent. The frame changes at once; the answer may
+/// wait for the file to be finished (joining screens is slow), on its own thread, so other
+/// requests don't.
+#[cfg(target_os = "linux")]
+fn record_for(
+    client: daemon::Pending,
+    command: crate::record::command::Command,
+    recorder: &mut crate::record::Recorder,
+    send_frame: &impl Fn(&crate::record::Recorder),
+) {
+    // Never record the frozen overlay.
+    if command.starts() && recorder.recording().is_none() && GATE.is_open() {
+        client.reply(&daemon::Reply::Busy);
+        return;
+    }
+    let before = recorder.recording().map(std::path::Path::to_path_buf);
+    let outcome = recorder.run(command, &mut crate::record::LiveEnv);
+    // A different recording (or none) now: its frame replaces the old one.
+    if recorder.recording() != before.as_deref() {
+        send_frame(recorder);
+    }
+    if !matches!(outcome, crate::record::Outcome::Finishing(_)) {
+        outcome.answer(client);
+        return;
+    }
+    std::thread::spawn(move || outcome.answer(client));
+}
+
 /// The end of a recording started from a standalone overlay: like a saved capture, print it.
 #[cfg(target_os = "linux")]
 fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) {
@@ -261,37 +289,25 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                 let mut recorder = recorder.borrow_mut();
                 recorder.recording()?;
                 if let Some(outcome) = recorder.ended_by_itself() {
-                    eprintln!("screencapture: the recorder stopped by itself: {outcome:?}");
                     send_frame(&recorder);
+                    std::thread::spawn(move || {
+                        let outcome = outcome.finished();
+                        eprintln!("screencapture: the recorder stopped by itself: {outcome:?}");
+                    });
                     return None;
                 }
                 Some(WATCH_RECORDER)
             };
             #[cfg(not(target_os = "linux"))]
             let watch = || None;
-            daemon::serve(&listener, Some(release_after), quiet, watch, |mut pending| {
+            daemon::serve(&listener, Some(release_after), quiet, watch, |pending| {
                 crate::trace_restart();
                 trace("request received");
                 #[cfg(target_os = "linux")]
                 {
                     let mut recorder = recorder.borrow_mut();
                     if let daemon::Request::Record(command) = pending.request.clone() {
-                        // Never record the frozen overlay.
-                        if command.starts() && recorder.recording().is_none() && GATE.is_open() {
-                            pending.reply(&daemon::Reply::Busy);
-                            return;
-                        }
-                        // A different recording (or none) now: its frame replaces the old one.
-                        let before = recorder.recording().map(std::path::Path::to_path_buf);
-                        let outcome = recorder.run(command, &mut crate::record::LiveEnv);
-                        if recorder.recording() != before.as_deref() {
-                            send_frame(&recorder);
-                        }
-                        let (reply, notes) = outcome.reply();
-                        for note in &notes {
-                            pending.note(note);
-                        }
-                        pending.reply(&reply);
+                        record_for(pending, command, &mut recorder, &send_frame);
                         return;
                     }
                     // Print while recording: say so, and leave the screen alone.

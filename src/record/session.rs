@@ -79,15 +79,49 @@ impl Session {
         }
     }
 
-    /// Finish the file and return its path.
-    pub fn stop(self) -> Result<PathBuf> {
-        let Some(join) = self.join else {
+    /// Stop every recorder: what is left to do before the file is ready.
+    pub fn stop(self) -> Result<Finishing> {
+        let Some(plan) = self.join else {
             let (active, _) = self.parts.into_iter().next().expect("a session has a recorder");
-            return active.stop();
+            return active.stop().map(Finishing::Done);
         };
         let slots: Vec<Rect> = self.parts.iter().map(|(_, slot)| *slot).collect();
-        let stopped = stop_parts(self.parts.into_iter().map(|(active, _)| active).collect())?;
-        join_parts(&stopped, &slots, &join, &self.path)
+        let parts = stop_parts(self.parts.into_iter().map(|(active, _)| active).collect())?;
+        Ok(Finishing::Join {
+            parts,
+            slots,
+            plan,
+            path: self.path,
+        })
+    }
+}
+
+/// A recording whose recorders have stopped: what is left before its file is ready.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Finishing {
+    /// One recorder wrote the file itself.
+    Done(PathBuf),
+    /// Parts to join into `path` (then convert, for a GIF): slow, ~45 s per recorded minute.
+    Join {
+        parts: Vec<Stopped>,
+        slots: Vec<Rect>,
+        plan: Join,
+        path: PathBuf,
+    },
+}
+
+impl Finishing {
+    /// Do what is left: the file's path.
+    pub fn finish(self) -> Result<PathBuf> {
+        match self {
+            Self::Done(path) => Ok(path),
+            Self::Join {
+                parts,
+                slots,
+                plan,
+                path,
+            } => join_parts(&parts, &slots, &plan, &path),
+        }
     }
 }
 
@@ -221,7 +255,8 @@ mod tests {
         let session = Session::start(&backend, plan.clone(), dir.path(), chrono::Local::now())
             .expect("recording starts");
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let path = session.stop().expect("recording stops and joins");
+        let stopped = session.stop().and_then(Finishing::finish);
+        let path = stopped.expect("recording stops and joins");
         (plan, path, dir)
     }
 

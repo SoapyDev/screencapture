@@ -298,7 +298,7 @@ impl Drop for Active {
 }
 
 /// A finished part of a recording.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stopped {
     pub video: PathBuf,
     /// When its first frame was taken, µs on the monotonic clock.

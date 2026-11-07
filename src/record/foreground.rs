@@ -33,8 +33,13 @@ pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Re
                 path.display()
             );
             show_frame(recorder.frame());
-            let ended = serve(&listener, &mut recorder, &mut super::LiveEnv, &stop);
+            let (ended, client) = serve(&listener, &mut recorder, &mut super::LiveEnv, &stop);
+            // The frame goes first: joining screens takes a while.
             show_frame(None);
+            let ended = ended.finished();
+            if let Some(client) = client {
+                ended.clone().answer(client);
+            }
             ended
         }
         other => other,
@@ -53,19 +58,25 @@ fn stop_on_signals() -> std::io::Result<Arc<AtomicBool>> {
     Ok(stop)
 }
 
-/// Answer clients while the recording runs; returns how it ended.
-fn serve(listener: &UnixListener, recorder: &mut Recorder, env: &mut impl Env, stop: &AtomicBool) -> Outcome {
+/// Answer clients while the recording runs; returns how it ended, and the client that ended it
+/// (answered once the file is finished).
+fn serve(
+    listener: &UnixListener,
+    recorder: &mut Recorder,
+    env: &mut impl Env,
+    stop: &AtomicBool,
+) -> (Outcome, Option<daemon::Pending>) {
     loop {
         if stop.load(Ordering::Relaxed) {
-            return recorder.run(Command::Stop, env);
+            return (recorder.run(Command::Stop, env), None);
         }
         if let Some(outcome) = recorder.ended_by_itself() {
-            return outcome;
+            return (outcome, None);
         }
         if !daemon::readable_within(listener, Duration::from_millis(100)) {
             continue;
         }
-        let Some(mut pending) = daemon::accept(listener) else {
+        let Some(pending) = daemon::accept(listener) else {
             continue;
         };
         let (outcome, ends) = match pending.request.clone() {
@@ -81,14 +92,10 @@ fn serve(listener: &UnixListener, recorder: &mut Recorder, env: &mut impl Env, s
                 continue;
             }
         };
-        let (reply, notes) = outcome.clone().reply();
-        for note in &notes {
-            pending.note(note);
-        }
-        pending.reply(&reply);
         if ends {
-            return outcome;
+            return (outcome, Some(pending));
         }
+        outcome.answer(pending);
     }
 }
 
@@ -134,7 +141,9 @@ mod tests {
                 .unwrap();
             (print, start.unwrap().unwrap().reply, stop.reply)
         });
-        let outcome = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        let (outcome, waiting) = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        let outcome = outcome.finished();
+        outcome.clone().answer(waiting.expect("the stop's client waits"));
         let (print, start, stop) = client.join().unwrap();
         assert_eq!(
             print,
@@ -145,6 +154,17 @@ mod tests {
         assert_eq!(stop, Reply::Saved(path.clone()));
         assert_eq!(outcome, Outcome::Saved(path.clone()));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn the_stop_client_waits_for_the_file_to_be_finished() {
+        let (_dir, socket, listener, mut recorder, mut env) = recording();
+        let client = std::thread::spawn(move || daemon::send(&socket, &Request::Record(Command::Stop)));
+        let (_, waiting) = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        let handed_back = waiting.is_some();
+        drop(waiting);
+        let _ = client.join();
+        assert!(handed_back, "serve answered the stop itself");
     }
 
     #[test]
@@ -160,7 +180,8 @@ mod tests {
     fn a_discard_request_ends_it() {
         let (_dir, socket, listener, mut recorder, mut env) = recording();
         let client = std::thread::spawn(move || daemon::send(&socket, &Request::Record(Command::Discard)));
-        let outcome = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        let (outcome, waiting) = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        drop(waiting);
         let _ = client.join();
         assert_eq!(outcome, Outcome::Discarded);
     }
@@ -175,7 +196,7 @@ mod tests {
             flag.store(true, Ordering::Relaxed);
         });
         assert!(matches!(
-            serve(&listener, &mut recorder, &mut env, &stop),
+            serve(&listener, &mut recorder, &mut env, &stop).0.finished(),
             Outcome::Saved(_)
         ));
     }
@@ -189,7 +210,9 @@ mod tests {
         let mut recorder = Recorder::default();
         recorder.run(Command::Start(Target::Focused, Overrides::default()), &mut env);
         assert!(matches!(
-            serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false)),
+            serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false))
+                .0
+                .finished(),
             Outcome::Saved(_)
         ));
     }

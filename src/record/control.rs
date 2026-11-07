@@ -7,7 +7,7 @@ use anyhow::Result;
 use super::{
     command::Command,
     plan::{self, Plan, Target},
-    session::Session,
+    session::{Finishing, Session},
     settings::{Fps, Overrides, Settings},
 };
 use crate::capture::{MonitorInfo, Rect};
@@ -26,6 +26,8 @@ pub enum Outcome {
     AlreadyRecording(PathBuf),
     NotRecording,
     Failed(String),
+    /// Stopped; the file still needs finishing, which can be slow (see [`Outcome::finished`]).
+    Finishing(Finishing),
 }
 
 /// The world a recording starts in.
@@ -70,7 +72,7 @@ impl Recorder {
             }
             (Command::Start(target, overrides) | Command::Toggle(target, overrides), _) => {
                 if running == Some(false) {
-                    let _ = self.stop();
+                    let _ = self.stop().finished();
                 }
                 self.start(&target, overrides, env)
             }
@@ -105,7 +107,7 @@ impl Recorder {
         self.frame = None;
         match self.active.take().map(Session::stop) {
             None => Outcome::NotRecording,
-            Some(Ok(path)) => Outcome::Saved(path),
+            Some(Ok(finishing)) => Outcome::Finishing(finishing),
             Some(Err(e)) => Outcome::Failed(format!("{e:#}")),
         }
     }
@@ -180,10 +182,30 @@ impl Env for LiveEnv {
 }
 
 impl Outcome {
-    /// The daemon's answer for it.
+    /// The file finished, if it still needed it (slow for joined screens): never `Finishing`.
+    pub fn finished(self) -> Self {
+        let Self::Finishing(finishing) = self else {
+            return self;
+        };
+        match finishing.finish() {
+            Ok(path) => Self::Saved(path),
+            Err(e) => Self::Failed(format!("{e:#}")),
+        }
+    }
+
+    /// Tell `client` (after finishing the file, if needed).
+    pub fn answer(self, mut client: crate::daemon::Pending) {
+        let (reply, notes) = self.reply();
+        for note in &notes {
+            client.note(note);
+        }
+        client.reply(&reply);
+    }
+
+    /// The daemon's answer for it (after finishing the file, if needed).
     pub fn reply(self) -> (crate::daemon::Reply, Vec<String>) {
         use crate::daemon::Reply;
-        match self {
+        match self.finished() {
             Self::Started { path, notes } => (Reply::Recording(path), notes),
             Self::Saved(path) => (Reply::Saved(path), Vec::new()),
             Self::AlreadyRecording(path) => (
@@ -193,6 +215,7 @@ impl Outcome {
             Self::NotRecording => (Reply::NotRecording, Vec::new()),
             Self::Discarded => (Reply::Cancelled, Vec::new()),
             Self::Failed(message) => (Reply::Error(message), Vec::new()),
+            Self::Finishing(_) => unreachable!("`finished` leaves nothing to finish"),
         }
     }
 }
@@ -286,9 +309,30 @@ mod tests {
             panic!("not started")
         };
         assert_eq!(r.recording(), Some(path.as_path()));
-        assert_eq!(r.run(Command::Stop, &mut env), Outcome::Saved(path.clone()));
+        assert_eq!(
+            r.run(Command::Stop, &mut env).finished(),
+            Outcome::Saved(path.clone())
+        );
         assert!(path.exists());
         assert_eq!(r.recording(), None);
+    }
+
+    #[test]
+    fn stopping_leaves_the_file_to_be_finished() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        r.run(start(), &mut env);
+        assert!(matches!(r.run(Command::Stop, &mut env), Outcome::Finishing(_)));
+    }
+
+    #[test]
+    fn finishing_a_stopped_recording_saves_it() {
+        let mut env = Fake::new();
+        let mut r = Recorder::default();
+        let Outcome::Started { path, .. } = r.run(start(), &mut env) else {
+            panic!("not started")
+        };
+        assert_eq!(r.run(Command::Stop, &mut env).finished(), Outcome::Saved(path));
     }
 
     #[test]
@@ -391,7 +435,7 @@ mod tests {
         let mut r = Recorder::default();
         let toggle = || Command::Toggle(Target::Focused, Overrides::default());
         assert!(matches!(r.run(toggle(), &mut env), Outcome::Started { .. }));
-        assert!(matches!(r.run(toggle(), &mut env), Outcome::Saved(_)));
+        assert!(matches!(r.run(toggle(), &mut env).finished(), Outcome::Saved(_)));
         assert_eq!(r.recording(), None);
     }
 
@@ -434,7 +478,10 @@ mod tests {
         };
         assert_eq!(r.ended_by_itself(), None, "still running");
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert_eq!(r.ended_by_itself(), Some(Outcome::Saved(path)));
+        assert_eq!(
+            r.ended_by_itself().map(Outcome::finished),
+            Some(Outcome::Saved(path))
+        );
         assert_eq!(r.recording(), None);
         assert_eq!(r.run(Command::Stop, &mut env), Outcome::NotRecording);
     }
