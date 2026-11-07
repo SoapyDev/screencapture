@@ -78,6 +78,12 @@ The screens are **frozen** the moment the overlay opens: you select (and draw) o
 image, so moving content, menus or tooltips are captured exactly as they were at the trigger.
 Nothing is saved until `Enter` (or the Capture button).
 
+The bar at the bottom holds what to do with the selection: **● Record** (`V`; `Shift+V` records
+every screen), **Capture** (`Enter`), and the recording settings (frame rate, resolution, format,
+quality, sound), which a click steps through and which are remembered. When a recording starts,
+the bars slide away and the overlay closes; drawings stay on screen and are recorded, so they can
+be prepared beforehand. See [Recording](#recording).
+
 Selecting:
 - Region mode (`R`): drag a rectangle, or click a screen to select all of it. Drag edges or
   corners to resize, drag inside to move, arrows nudge, `Shift`+arrows resize. A click outside
@@ -113,6 +119,9 @@ unpicked screen in the middle) are removed. Screens with different scales are re
 highest density.
 
 ## Recording
+
+From the overlay: select, optionally draw, then `V` (or the Record button); `Shift+V` records
+every screen. From the command line or a key binding:
 
 ```sh
 screencapture record                          # the focused screen, until stopped

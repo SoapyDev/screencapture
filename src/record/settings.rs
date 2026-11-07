@@ -135,6 +135,98 @@ pub enum Audio {
     Both,
 }
 
+/// A recording setting picked from a fixed list, as shown on its button.
+pub trait Choice: ValueEnum + Copy + PartialEq + 'static {
+    /// What the setting is, before its value on the button; empty when the value says it.
+    const TITLE: &'static str;
+
+    /// The value, for people.
+    fn name(self) -> &'static str;
+
+    /// The next value, wrapping around.
+    fn next(self) -> Self {
+        let all = Self::value_variants();
+        let here = all.iter().position(|value| *value == self).unwrap_or(0);
+        all[(here + 1) % all.len()]
+    }
+
+    /// Button text.
+    fn label(self) -> String {
+        if Self::TITLE.is_empty() {
+            return self.name().into();
+        }
+        format!("{} {}", Self::TITLE, self.name())
+    }
+}
+
+impl Choice for Fps {
+    const TITLE: &'static str = "FPS";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Native => "Native",
+            Self::Adaptive => "Adaptive",
+            Self::F120 => "120",
+            Self::F60 => "60",
+            Self::F30 => "30",
+            Self::F15 => "15",
+        }
+    }
+}
+
+impl Choice for Resolution {
+    const TITLE: &'static str = "Res";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Native => "Native",
+            Self::P1440 => "1440p",
+            Self::P1080 => "1080p",
+            Self::P720 => "720p",
+            Self::P480 => "480p",
+        }
+    }
+}
+
+impl Choice for Format {
+    const TITLE: &'static str = "";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Av1 => "MP4 · AV1",
+            Self::H264 => "MP4 · H.264",
+            Self::Hevc => "MP4 · HEVC",
+            Self::Gif => "GIF",
+        }
+    }
+}
+
+impl Choice for Quality {
+    const TITLE: &'static str = "Quality";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::VeryHigh => "Very high",
+            Self::Ultra => "Ultra",
+        }
+    }
+}
+
+impl Choice for Audio {
+    const TITLE: &'static str = "";
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "No sound",
+            Self::Output => "System sound",
+            Self::Input => "Microphone",
+            Self::Both => "System + mic",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -160,6 +252,19 @@ pub struct Overrides {
     pub quality: Option<Quality>,
     #[arg(long, global = true)]
     pub audio: Option<Audio>,
+}
+
+impl From<Settings> for Overrides {
+    /// Every setting given: the recording uses exactly `settings`.
+    fn from(settings: Settings) -> Self {
+        Self {
+            fps: Some(settings.fps),
+            resolution: Some(settings.resolution),
+            format: Some(settings.format),
+            quality: Some(settings.quality),
+            audio: Some(settings.audio),
+        }
+    }
 }
 
 impl Overrides {
@@ -248,6 +353,38 @@ mod tests {
         assert_eq!(Fps::Adaptive.fixed(), None);
         assert_eq!(Resolution::P1080.max_height(), Some(1080));
         assert_eq!(Resolution::Native.max_height(), None);
+    }
+
+    #[test]
+    fn a_choice_steps_to_the_next_value() {
+        assert_eq!(Fps::Native.next(), Fps::Adaptive);
+    }
+
+    #[test]
+    fn the_last_choice_wraps_to_the_first() {
+        assert_eq!(Audio::Both.next(), Audio::Off);
+    }
+
+    #[test]
+    fn labels_carry_the_title() {
+        assert_eq!(Quality::VeryHigh.label(), "Quality Very high");
+    }
+
+    #[test]
+    fn labels_without_a_title_are_the_value() {
+        assert_eq!(Format::Av1.label(), "MP4 · AV1");
+    }
+
+    #[test]
+    fn settings_as_overrides_replace_every_setting() {
+        let chosen = Settings {
+            fps: Fps::F30,
+            resolution: Resolution::P720,
+            format: Format::Gif,
+            quality: Quality::Ultra,
+            audio: Audio::Input,
+        };
+        assert_eq!(Overrides::from(chosen).apply(Settings::default()), chosen);
     }
 
     #[test]

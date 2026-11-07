@@ -9,9 +9,12 @@
 //! Latency: the capture runs on its own thread, overlapping gpui start-up when standalone; in
 //! the daemon it is the only work done before the windows open.
 
+mod actions;
 #[cfg(unix)]
 mod gate;
 mod keys;
+#[cfg(target_os = "linux")]
+mod launch;
 pub mod layout;
 mod recording;
 mod tools;
@@ -49,8 +52,13 @@ use crate::{
 
 use layout::Edge;
 
+#[cfg(target_os = "linux")]
+pub use launch::with_recording_frame;
+
 enum Phase {
     Selecting,
+    /// A recording is starting: the bars slide away, then the overlay closes.
+    Leaving,
     /// Windows closed; composing and encoding in the background.
     Saving,
     /// Overlays closed while the folder picker is open.
@@ -152,6 +160,8 @@ pub struct Overlay {
     tools_ready: bool,
     /// Per overlay, for `SCREENCAPTURE_TRACE`.
     traced: std::cell::Cell<bool>,
+    /// Why the last action couldn't be done, shown above the action bar.
+    notice: Option<SharedString>,
 }
 
 /// Open the overlay once `frozen` (started before gpui, to overlap its start-up) is ready, and
@@ -173,63 +183,28 @@ pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, 
 }
 
 /// Resident mode: initialise the GPU once, then open an overlay per client request.
-/// Run `work` on its own thread while gpui shows the recording frame it asks for, then quit.
-/// For recording without the daemon.
+/// The end of a recording started from a standalone overlay: like a saved capture, print it.
 #[cfg(target_os = "linux")]
-pub fn with_recording_frame<R: Send + 'static>(
-    work: impl FnOnce(crate::record::foreground::ShowFrame) -> R + Send + 'static,
-) -> R {
-    use futures::StreamExt;
-    let result = Arc::new(std::sync::Mutex::new(None));
-    let slot = result.clone();
-    gpui_platform::application().run(move |cx: &mut App| {
-        cx.set_quit_mode(QuitMode::Explicit);
-        // `Some(spec)`: show (or take down) a frame; `None`: the work is done.
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Option<recording::Spec>>>();
-        std::thread::spawn(move || {
-            let done = work(&mut |frame| {
-                let spec = frame.map(|(area, monitors)| recording::Spec {
-                    area,
-                    monitors,
-                    shapes: Vec::new(),
-                });
-                let _ = tx.unbounded_send(Some(spec));
-            });
-            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(done);
-            let _ = tx.unbounded_send(None);
-        });
-        cx.spawn(async move |cx| {
-            let mut shown: Option<recording::Shown> = None;
-            while let Some(Some(spec)) = rx.next().await {
-                cx.update(|cx| {
-                    if let Some(old) = shown.take() {
-                        recording::hide(old, cx);
-                    }
-                    shown = spec.map(|spec| recording::show(&spec, cx));
-                });
-            }
-            cx.update(|cx| {
-                if let Some(old) = shown.take() {
-                    recording::hide(old, cx);
-                }
-                cx.quit();
-            });
-        })
-        .detach();
-    });
-    let done = result
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    done.expect("the recording thread finished before gpui quit")
+fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) {
+    match outcome {
+        Ok(crate::record::Outcome::Saved(path)) => {
+            SAVED.store(true, Ordering::Relaxed);
+            println!("{}", path.display());
+        }
+        Ok(crate::record::Outcome::Failed(e)) => eprintln!("screencapture: {e}"),
+        Ok(other) => eprintln!("screencapture: recording: {other:?}"),
+        Err(e) => eprintln!("screencapture: {e:#}"),
+    }
 }
 
 /// Work the daemon's request thread hands to the UI thread.
 #[cfg(unix)]
 enum ToUi {
     Overlay(daemon::Pending, anyhow::Result<Frozen>, Config),
-    /// Show this recording frame, replacing any other; `None` removes it.
-    Frame(Option<recording::Spec>),
+    /// Show the frame for this recorded area on these screens, replacing any other; `None`
+    /// removes it.
+    #[cfg(target_os = "linux")]
+    Frame(Option<(Rect, Vec<MonitorInfo>)>),
 }
 
 /// How often the daemon checks on a running recorder (it may quit by itself).
@@ -271,12 +246,9 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
             let recorder = std::cell::RefCell::new(crate::record::Recorder::default());
             #[cfg(target_os = "linux")]
             let send_frame = |recorder: &crate::record::Recorder| {
-                let spec = recorder.frame().map(|(area, monitors)| recording::Spec {
-                    area,
-                    monitors,
-                    shapes: Vec::new(),
-                });
-                let _ = tx.unbounded_send(ToUi::Frame(spec));
+                // Owned only here, to cross to the UI thread.
+                let frame = recorder.frame().map(|(area, monitors)| (area, monitors.to_vec()));
+                let _ = tx.unbounded_send(ToUi::Frame(frame));
             };
             // While recording: notice a recorder that quit by itself, and take its frame down.
             #[cfg(target_os = "linux")]
@@ -318,7 +290,7 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                     }
                     // Print while recording: say so, and leave the screen alone.
                     if let Some(path) = recorder.recording() {
-                        pending.reply(&daemon::Reply::Recording(path));
+                        pending.reply(&daemon::Reply::Recording(path.to_path_buf()));
                         return;
                     }
                 }
@@ -352,11 +324,10 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                     ToUi::Overlay(pending, frozen, config) => {
                         cx.update(|cx| serve_request(pending, frozen, config, cx));
                     }
-                    ToUi::Frame(spec) => cx.update(|cx| {
-                        if let Some(old) = shown.take() {
-                            recording::hide(old, cx);
-                        }
-                        shown = spec.map(|spec| recording::show(&spec, cx));
+                    #[cfg(target_os = "linux")]
+                    ToUi::Frame(frame) => cx.update(|cx| {
+                        let spec = launch::spec_for(frame, cx);
+                        launch::replace_frame(&mut shown, spec, cx);
                     }),
                 }
             }
@@ -460,6 +431,7 @@ fn start(
             scroll: 0.,
             tools_ready: false,
             traced: std::cell::Cell::new(false),
+            notice: None,
         }
     });
     open_windows(&overlay, cx);
@@ -474,6 +446,8 @@ fn start(
         let line = std::env::var_os("SCREENCAPTURE_E2E_LINE").is_some();
         // Redact the left quarter, write "Hi" on a filled box in the top-right quarter.
         let extras = std::env::var_os("SCREENCAPTURE_E2E_EXTRAS").is_some();
+        // Record the region instead of capturing it.
+        let record = std::env::var_os("SCREENCAPTURE_E2E_RECORD").is_some();
         cx.spawn(async move |cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
@@ -498,7 +472,11 @@ fn start(
                     a.type_text("Hi");
                     a.stop_editing();
                 }
-                o.finish(Some(Request::Region(rect)), cx);
+                if record {
+                    o.record_target(crate::record::plan::Target::Region(rect), cx);
+                } else {
+                    o.finish(Some(Request::Region(rect)), cx);
+                }
             });
         })
         .detach();
@@ -631,6 +609,11 @@ fn close_windows(overlay: &Entity<Overlay>, cx: &mut App) {
 impl Overlay {
     const fn selecting(&self) -> bool {
         matches!(self.phase, Phase::Selecting)
+    }
+
+    /// The selection and drawings are on screen (while selecting, and while the bars leave).
+    const fn shows_selection(&self) -> bool {
+        matches!(self.phase, Phase::Selecting | Phase::Leaving)
     }
 
     fn finish(&mut self, request: Option<Request>, cx: &mut Context<Self>) {
@@ -767,6 +750,7 @@ impl Overlay {
     }
 
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.notice = None;
         self.put_tool_down();
         self.selection.set_mode(mode);
         cx.notify();
@@ -975,8 +959,8 @@ impl Overlay {
 /// What the main toolbar row shows, read from the overlay before building it.
 struct Bar {
     mode: Mode,
-    /// Picked screens, or 1 for a region; 0 when there is nothing to capture yet.
-    ready: usize,
+    /// Sliding away: a recording is starting.
+    leaving: bool,
     output: SharedString,
     edge: Edge,
     /// Every screen picked: "All screens" is the active choice.
@@ -1052,6 +1036,7 @@ impl View {
                 "r" => o.set_mode(Mode::Region, cx),
                 "s" => o.set_mode(Mode::Screens, cx),
                 "o" => o.browse(cx),
+                "v" => o.record(shift, cx),
                 "c" => o.cycle_color(cx),
                 "p" => o.toggle_picker(cx),
                 "[" | "-" => o.step_width(-1., cx),
@@ -1116,10 +1101,6 @@ impl View {
             let overlay = overlay.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| overlay.update(cx, f)
         };
-        let capture = match (bar.mode, bar.ready) {
-            (Mode::Screens, n) => format!("Capture {n}  ⏎"),
-            (Mode::Region, _) => "Capture  ⏎".into(),
-        };
         let main = panel()
             .child(
                 tools::button("region", "Region  R", bar.mode == Mode::Region)
@@ -1130,7 +1111,6 @@ impl View {
                     .on_click(act(|o, cx| o.set_mode(Mode::Screens, cx))),
             )
             .child(tools::button("all", "All screens  A", bar.all).on_click(act(Overlay::select_all)))
-            .child(tools::button("capture", capture, bar.ready > 0).on_click(act(Overlay::confirm)))
             .child(separator())
             .child(
                 tools::button("folder", format!("Save in {}  O", bar.output), false)
@@ -1163,12 +1143,18 @@ impl View {
                     .child(column),
             };
         }
-        let place = div().absolute().left_0().right_0().flex().justify_center();
-        match bar.edge {
-            Edge::Top => place.top(px(24.)),
-            Edge::Bottom => place.bottom(px(24.)),
-        }
-        .child(column)
+        let place = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(column);
+        let offset = match bar.edge {
+            Edge::Top => actions::EDGE_GAP,
+            Edge::Bottom => actions::EDGE_GAP + actions::ACTION_BAR_ROOM,
+        };
+        actions::slide(place, bar.edge, offset, bar.leaving, "toolbar")
     }
 }
 
@@ -1253,7 +1239,7 @@ impl Render for View {
                     .object_fit(ObjectFit::Fill),
             );
         }
-        if !o.selecting() {
+        if !o.shows_selection() {
             return root;
         }
 
@@ -1456,9 +1442,10 @@ impl Render for View {
                 Some(Request::Region(_)) => 1,
                 None => 0,
             };
+            let leaving = matches!(o.phase, Phase::Leaving);
             let bar = Bar {
                 mode,
-                ready,
+                leaving,
                 output: o.output_label(),
                 edge: layout::toolbar_edge(monitor, region),
                 all: o.selection.is_all(),
@@ -1476,7 +1463,16 @@ impl Render for View {
                     target: o.annotations.target,
                 },
             };
-            layer = layer.child(self.toolbar(&bar, cx));
+            let actions = actions::ActionBar {
+                mode,
+                ready,
+                settings: o.config.record,
+                notice: o.notice.as_ref(),
+                leaving,
+            };
+            layer = layer
+                .child(self.toolbar(&bar, cx))
+                .child(actions::action_bar(&self.overlay, &actions));
         }
 
         // Window-wide listeners: during a drag the compositor keeps sending pointer events to

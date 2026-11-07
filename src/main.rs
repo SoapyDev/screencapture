@@ -100,12 +100,13 @@ fn overlay_mode(mode: selection::Mode, config: Config) -> ExitCode {
                 eprintln!("screencapture: a selection is already open");
                 ExitCode::FAILURE
             }
+            // Started from this overlay, or already running: either way, a recording runs.
             Ok(daemon::Reply::Recording(path)) => {
                 eprintln!(
                     "screencapture: recording to {}; `screencapture record stop` ends it",
                     path.display()
                 );
-                ExitCode::FAILURE
+                ExitCode::SUCCESS
             }
             Ok(daemon::Reply::Error(e)) => {
                 eprintln!("screencapture: {e}");

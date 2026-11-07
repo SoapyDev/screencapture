@@ -52,7 +52,7 @@ impl Recorder {
             (Command::Stop | Command::Toggle(..), Some(_)) => self.stop(),
             (Command::Stop, None) => Outcome::NotRecording,
             (Command::Start(..), Some(true)) => {
-                Outcome::AlreadyRecording(self.recording().unwrap_or_default())
+                Outcome::AlreadyRecording(self.recording().map_or_else(Default::default, Path::to_path_buf))
             }
             (Command::Start(target, overrides) | Command::Toggle(target, overrides), _) => {
                 if running == Some(false) {
@@ -96,13 +96,14 @@ impl Recorder {
     }
 
     /// The recorded area and the screens around it, for the frame shown while recording.
-    pub fn frame(&self) -> Option<(Rect, Vec<MonitorInfo>)> {
-        self.frame.clone()
+    pub fn frame(&self) -> Option<(Rect, &[MonitorInfo])> {
+        let (area, monitors) = self.frame.as_ref()?;
+        Some((*area, monitors))
     }
 
     /// The file being recorded, if a recording runs.
-    pub fn recording(&self) -> Option<PathBuf> {
-        self.active.as_ref().map(|a| a.path.clone())
+    pub fn recording(&self) -> Option<&Path> {
+        self.active.as_ref().map(|active| active.path.as_path())
     }
 
     /// The recorder quit on its own (screen unplugged, crash): finish what it left.
@@ -245,7 +246,7 @@ mod tests {
         let Outcome::Started { path, .. } = r.run(start(), &mut env) else {
             panic!("not started")
         };
-        assert_eq!(r.recording(), Some(path.clone()));
+        assert_eq!(r.recording(), Some(path.as_path()));
         assert_eq!(r.run(Command::Stop, &mut env), Outcome::Saved(path.clone()));
         assert!(path.exists());
         assert_eq!(r.recording(), None);

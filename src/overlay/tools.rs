@@ -89,7 +89,7 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, activ
 }
 
 /// Click handler running `f` on the overlay.
-fn on(
+pub(super) fn on(
     overlay: &Entity<Overlay>,
     f: impl Fn(&mut Overlay, &mut gpui::Context<Overlay>) + 'static,
 ) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {

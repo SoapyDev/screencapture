@@ -16,7 +16,7 @@ use super::{Env, Outcome, Recorder, command::Command};
 use crate::daemon::{self, Reply, Request};
 
 /// The recorded area and the screens, while recording; `None` once it ended.
-pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<(crate::capture::Rect, Vec<crate::capture::MonitorInfo>)>);
+pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<(crate::capture::Rect, &[crate::capture::MonitorInfo])>);
 
 /// Record `command` (a start), in this process, until told to stop. Prints how to stop it.
 pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Result<Outcome> {
@@ -72,7 +72,11 @@ fn serve(listener: &UnixListener, recorder: &mut Recorder, env: &mut impl Env, s
             Request::Record(command @ Command::Start(..)) => (recorder.run(command, env), false),
             Request::Record(Command::Stop | Command::Toggle(..)) => (recorder.run(Command::Stop, env), true),
             Request::Overlay(_) => {
-                pending.reply(&Reply::Recording(recorder.recording().unwrap_or_default()));
+                pending.reply(&Reply::Recording(
+                    recorder
+                        .recording()
+                        .map_or_else(Default::default, Path::to_path_buf),
+                ));
                 continue;
             }
         };
@@ -112,7 +116,10 @@ mod tests {
     #[test]
     fn a_stop_request_ends_it_and_gets_the_file() {
         let (_dir, socket, listener, mut recorder, mut env) = recording();
-        let path = recorder.recording().unwrap();
+        let path = recorder
+            .recording()
+            .expect("a recording was just started")
+            .to_path_buf();
         let client = std::thread::spawn(move || {
             let print = daemon::request(&socket, crate::selection::Mode::Region)
                 .unwrap()
