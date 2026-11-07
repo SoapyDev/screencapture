@@ -23,8 +23,9 @@ signal-hook.workspace = true
 rustix.workspace = true
 
 [features]
-# The frame around the recorded area needs layer-shell surfaces.
-wayland = []
+# The frame around the recorded area needs layer-shell surfaces; the live tests list the
+# screens through the core's Wayland backend.
+wayland = ["screencapture-core/wayland"]
 
 [dev-dependencies]
 tempfile.workspace = true
