@@ -1,4 +1,5 @@
 //! Optional Hyprland IPC: where the pointer is, before any of our surfaces has seen it.
+//!
 //! Wayland only tells a client about the pointer once it enters one of its surfaces; knowing
 //! it up front lets the overlay open on the pointer's monitor first and place the toolbar there.
 
@@ -29,6 +30,7 @@ fn ask(request: &str) -> Option<String> {
     Some(text)
 }
 
+#[must_use]
 pub fn cursor() -> Option<(i32, i32)> {
     parse_cursor(&ask("cursorpos")?)
 }
@@ -44,6 +46,7 @@ fn parse_focused(json: &str) -> Option<String> {
 }
 
 /// The monitor with keyboard focus.
+#[must_use]
 pub fn focused_monitor() -> Option<String> {
     parse_focused(&ask("j/monitors")?)
 }

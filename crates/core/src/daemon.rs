@@ -1,4 +1,6 @@
-//! Resident mode. gpui's first window costs ~200 ms (GPU device and pipeline setup), later
+//! Resident mode: one process keeps the GPU warm and serves every capture.
+//!
+//! gpui's first window costs ~200 ms (GPU device and pipeline setup), later
 //! ones ~15 ms. `screencapture daemon` pays that once; later invocations hand their request
 //! to it over a Unix socket so the overlay appears almost immediately.
 //!
@@ -82,6 +84,7 @@ pub struct Answer {
     pub notes: Vec<String>,
 }
 
+#[must_use]
 pub const fn encode_mode(mode: Mode) -> &'static str {
     match mode {
         Mode::Region => "region",
@@ -89,6 +92,7 @@ pub const fn encode_mode(mode: Mode) -> &'static str {
     }
 }
 
+#[must_use]
 pub fn parse_mode(line: &str) -> Option<Mode> {
     match line.trim() {
         "region" => Some(Mode::Region),
@@ -98,6 +102,7 @@ pub fn parse_mode(line: &str) -> Option<Mode> {
 }
 
 impl Reply {
+    #[must_use]
     pub fn encode(&self) -> String {
         match self {
             Self::Saved(path) => format!("saved {}", path.display()),
@@ -110,6 +115,7 @@ impl Reply {
         }
     }
 
+    #[must_use]
     pub fn parse(line: &str) -> Option<Self> {
         let line = line.trim_end_matches(['\r', '\n']);
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -126,6 +132,7 @@ impl Reply {
 }
 
 /// `$XDG_RUNTIME_DIR/screencapture.sock`: per user, not readable by others.
+#[must_use]
 pub fn socket_path() -> PathBuf {
     dirs::runtime_dir()
         .unwrap_or_else(|| {
@@ -135,6 +142,7 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Ask a running daemon to show the overlay. `None` when no daemon listens at `path`.
+#[must_use]
 pub fn request(path: &Path, mode: Mode) -> Option<Result<Reply>> {
     let overlay: Request<NoExtension> = Request::Overlay(mode);
     send(path, &overlay).map(|answer| answer.map(|a| a.reply))
@@ -229,8 +237,9 @@ pub fn bind(path: &Path) -> Result<UnixListener> {
 /// Long enough for any real client to send its one line.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Accept requests forever, handing each to `handle` (malformed ones are answered here). After
-/// `idle` without a request, `on_idle` runs, once per quiet spell. `watch` runs before every
+/// Accept requests forever, handing each to `handle` (malformed ones are answered here).
+///
+/// After `idle` without a request, `on_idle` runs, once per quiet spell. `watch` runs before every
 /// wait and says when it wants to run again (`None`: only after the next request).
 pub fn serve<E: Extension>(
     listener: &UnixListener,
@@ -271,6 +280,7 @@ pub fn serve<E: Extension>(
 
 /// Take the next client's request (blocks until one connects); malformed ones are answered
 /// here and give `None`.
+#[must_use]
 pub fn accept<E: Extension>(listener: &UnixListener) -> Option<Pending<E>> {
     let (stream, _) = listener.accept().ok()?;
     let mut line = String::new();
@@ -288,6 +298,7 @@ pub fn accept<E: Extension>(listener: &UnixListener) -> Option<Pending<E>> {
 }
 
 /// Whether a client knocks on `listener` within `wait`.
+#[must_use]
 pub fn readable_within(listener: &UnixListener, wait: std::time::Duration) -> bool {
     use rustix::event::{PollFd, PollFlags, Timespec};
     let deadline = std::time::Instant::now() + wait;

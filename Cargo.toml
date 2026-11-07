@@ -1,20 +1,23 @@
-# Nightly-only: lets profiles carry rustflags, so polonius applies to this crate only, not deps.
+# Nightly-only: lets profiles carry rustflags, so polonius applies to our crates only, not deps.
 cargo-features = ["profile-rustflags"]
 
-[package]
-name = "screencapture"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Capture a region, a screen, or several screens stitched into one image"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SoapyDev/screencapture"
 
-[dependencies]
+[workspace.dependencies]
+screencapture-core = { path = "crates/core", default-features = false }
 # GPUI has no recent crates.io release; track Zed's main branch, pinned to a known-good commit
 # (same as gpui-calculator). To update, change `rev` to a newer commit from main.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b" }
-# Linux display backends come from the `wayland` / `x11` features below; with neither, gpui
-# silently runs headless.
+# Linux display backends come from the `wayland` / `x11` features; with neither, gpui silently
+# runs headless.
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b", features = ["font-kit"] }
 anyhow = "1"
 chrono = "0.4"
@@ -29,42 +32,20 @@ lyon = "1"
 # tool identically for the preview and the saved image.
 cosmic-text = "0.19"
 futures = { version = "0.3", default-features = false, features = ["std"] }
-
-# Linux: each display server's code is only compiled when its feature is on.
-[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 # Ctrl+C while recording without the daemon: a safe, signal-safe flag.
 signal-hook = "0.3"
 # Native backend for wlroots-style compositors (Hyprland, Sway, river...): xcap's wlroots path
 # fails on Hyprland with a wl_shm pool error.
-memmap2 = { version = "0.9", optional = true }
-wayland-client = { version = "0.31", optional = true }
-wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
-wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
-# X11 capture backend.
-xcap = { version = "0.9", optional = true }
-
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs", "process", "event"] }
-
-# Windows and macOS always capture through xcap.
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+memmap2 = "0.9"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 xcap = "0.9"
+rustix = { version = "1", features = ["fs", "process", "event"] }
+tempfile = "3.27.0"
 
-[features]
-default = ["wayland"]
-# Wayland: gpui's Wayland backend (layer-shell overlay) + native wlr-screencopy capture.
-wayland = [
-    "gpui_platform/wayland",
-    "dep:memmap2",
-    "dep:wayland-client",
-    "dep:wayland-protocols",
-    "dep:wayland-protocols-wlr",
-]
-# X11: gpui's X11 backend + xcap capture.
-x11 = ["gpui_platform/x11", "dep:xcap"]
-
-[lints.clippy]
+[workspace.lints.clippy]
 # CLAUDE.md rule 18: no unwrap outside tests (tests move to `expect` when touched).
 unwrap_used = "warn"
 pedantic = { level = "warn", priority = -1 }
@@ -77,6 +58,51 @@ cast_possible_wrap = "allow"
 unreadable_literal = "allow"
 too_many_lines = "allow"
 many_single_char_names = "allow"
+# The crates are internal (one program), not a published API: no `# Errors` / `# Panics` sections.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[package]
+name = "screencapture"
+description = "Capture a region, a screen, or several screens stitched into one image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+screencapture-core.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+lyon.workspace = true
+cosmic-text.workspace = true
+futures.workspace = true
+
+# Linux: each display server's code is only compiled when its feature is on.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+signal-hook.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[features]
+default = ["wayland"]
+# Wayland: gpui's Wayland backend (layer-shell overlay) + native wlr-screencopy capture.
+wayland = ["gpui_platform/wayland", "screencapture-core/wayland"]
+# X11: gpui's X11 backend + xcap capture.
+x11 = ["gpui_platform/x11", "screencapture-core/x11"]
+
+[lints]
+workspace = true
 
 [profile.release]
 codegen-units = 1
@@ -94,12 +120,23 @@ rustflags = ["-Zpolonius=next"]
 [profile.release.package.screencapture]
 rustflags = ["-Zpolonius=next"]
 
+[profile.dev.package.screencapture-core]
+rustflags = ["-Zpolonius=next"]
+
+[profile.release.package.screencapture-core]
+rustflags = ["-Zpolonius=next"]
+
 [profile.dev.package."*"]
 debug = false
 opt-level = 2
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile.workspace = true
+
+# The virtual pointer that drives the end-to-end tests and the `drive` example.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
 
 # Test driver: real pointer input for checking the overlay (see examples/drive.rs).
 [[example]]

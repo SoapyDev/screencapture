@@ -7,6 +7,7 @@ use chrono::{DateTime, Local};
 
 /// `2026-11-06_14-35-38.123`, as in `screenshot_2026-11-06_14-35-38.123.png`: sorts
 /// chronologically, safe on every filesystem.
+#[must_use]
 pub fn stamp(time: DateTime<Local>) -> String {
     time.format("%Y-%m-%d_%H-%M-%S%.3f").to_string()
 }

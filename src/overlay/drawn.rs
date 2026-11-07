@@ -46,13 +46,6 @@ impl Drawings for Drawn {
     }
 }
 
-#[cfg_attr(
-    not(any(test, all(target_os = "linux", feature = "wayland"))),
-    expect(
-        dead_code,
-        reason = "only the recording frame, which needs layer-shell, shows them"
-    )
-)]
 /// Room a drawing takes on screen: its points, plus what its stroke, arrow head or disc adds.
 fn extent(shape: &Shape) -> Rect {
     let (left, top, right, bottom) = shape.bounds();
@@ -69,13 +62,6 @@ fn extent(shape: &Shape) -> Rect {
     )
 }
 
-#[cfg_attr(
-    not(all(target_os = "linux", feature = "wayland")),
-    expect(
-        dead_code,
-        reason = "only the recording frame, which needs layer-shell, shows them"
-    )
-)]
 /// The drawings inside `area`, on a window covering it.
 struct DrawnView {
     area: Rect,
@@ -84,13 +70,6 @@ struct DrawnView {
     texts: HashMap<tools::TextKey, Arc<RenderImage>>,
 }
 
-#[cfg_attr(
-    not(all(target_os = "linux", feature = "wayland")),
-    expect(
-        dead_code,
-        reason = "only the recording frame, which needs layer-shell, shows them"
-    )
-)]
 impl DrawnView {
     /// A text box, as an image placed where it lies in `area`.
     fn text(&mut self, shape: &Shape, scale: f32) -> Option<gpui::AnyElement> {

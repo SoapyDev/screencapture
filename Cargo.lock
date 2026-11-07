@@ -4819,12 +4819,31 @@ dependencies = [
  "image",
  "libc",
  "lyon",
- "memmap2",
  "rustix 1.1.6",
+ "screencapture-core",
  "serde",
  "serde_json",
  "signal-hook",
  "smallvec",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "screencapture-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "gpui",
+ "image",
+ "libc",
+ "memmap2",
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
  "tempfile",
  "wayland-client",
  "wayland-protocols",

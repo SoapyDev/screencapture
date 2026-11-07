@@ -1,27 +1,18 @@
 mod annotate;
-mod capture;
 mod cli;
-mod clipboard;
-mod config;
-#[cfg(unix)]
-mod daemon;
-mod drawings;
-#[cfg(unix)]
-mod hyprland;
 mod job;
-mod memory;
-mod naming;
 mod overlay;
 mod record;
 mod save;
-mod selection;
 mod text;
-mod trace;
 
 use std::process::ExitCode;
 
 use clap::Parser;
-pub use trace::{trace, trace_restart};
+use screencapture_core::{capture, clipboard, config, drawings, memory, naming, selection};
+#[cfg(unix)]
+use screencapture_core::{daemon, hyprland};
+pub use screencapture_core::{trace, trace_restart};
 
 use crate::{
     cli::{Cli, Plan},

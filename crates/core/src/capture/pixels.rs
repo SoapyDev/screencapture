@@ -30,6 +30,7 @@ pub enum PixelFormat {
 
 impl PixelFormat {
     /// Lower is better: already BGRA beats a swap beats a 10-bit repack.
+    #[must_use]
     pub const fn preference(self) -> u8 {
         match self {
             Self::Xrgb8888 | Self::Argb8888 => 0,
@@ -56,6 +57,7 @@ pub enum Transform {
 
 /// Convert a framebuffer to opaque BGRA (in an `RgbaImage` container: the channel order is
 /// B, G, R, A). `y_invert` means rows are stored bottom-up.
+#[must_use]
 pub fn to_bgra(
     format: PixelFormat,
     data: &[u8],
@@ -136,6 +138,7 @@ const fn ten_to_eight(channel: u32) -> u8 {
 
 /// Turn a framebuffer-oriented image into what the user sees on screen: undo the compositor's
 /// work in reverse order, turning back clockwise, then mirroring.
+#[must_use]
 pub fn apply_transform(image: RgbaImage, transform: Transform) -> RgbaImage {
     use Transform::{Flipped, Flipped90, Flipped180, Flipped270, Normal, Rotate90, Rotate180, Rotate270};
     use image::imageops::{flip_horizontal, rotate90, rotate180, rotate270};

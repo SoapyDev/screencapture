@@ -1,4 +1,6 @@
-//! Settings remembered between runs, in one file. Each feature keeps its own section (its own
+//! Settings remembered between runs, in one file.
+//!
+//! Each feature keeps its own section (its own
 //! top-level keys) and reads and writes only that, so a feature left out of the build leaves
 //! its settings alone, and a broken section costs only its own settings.
 
@@ -20,6 +22,7 @@ pub struct Config {
 
 impl Config {
     /// `S`'s settings, or its defaults when they are missing or don't make sense.
+    #[must_use]
     pub fn section<S: Section>(&self) -> S {
         S::deserialize(&self.keys).unwrap_or_default()
     }
@@ -39,11 +42,13 @@ impl Config {
     }
 
     /// `~/.config/screencapture/config.json`.
+    #[must_use]
     pub fn path() -> Option<PathBuf> {
         dirs::config_dir().map(|dir| dir.join("screencapture").join("config.json"))
     }
 
     /// A missing or unreadable file reads as empty: a broken config must not block a capture.
+    #[must_use]
     pub fn load_from(path: &Path) -> Self {
         let read = std::fs::read(path).ok();
         let keys = read.and_then(|bytes| serde_json::from_slice(&bytes).ok());

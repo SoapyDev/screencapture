@@ -1,5 +1,7 @@
 //! Screen capture: grab every monitor once into a [`Snapshot`], then cut regions or stitch
-//! screens out of it. All geometry is in the compositor's logical (global desktop) coordinates;
+//! screens out of it.
+//!
+//! All geometry is in the compositor's logical (global desktop) coordinates;
 //! images are in physical pixels, in BGRA byte order (what compositors hand out and gpui shows),
 //! so the only RGBA conversion is of the final cut, just before it is encoded.
 
@@ -49,33 +51,40 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[must_use]
     pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
         Self { x, y, w, h }
     }
 
     /// Rectangle spanning two corner points, in any order.
+    #[must_use]
     pub fn from_corners((x0, y0): (i32, i32), (x1, y1): (i32, i32)) -> Self {
         let (left, right) = (x0.min(x1), x0.max(x1));
         let (top, bottom) = (y0.min(y1), y0.max(y1));
         Self::new(left, top, right - left, bottom - top)
     }
 
+    #[must_use]
     pub const fn right(self) -> i32 {
         self.x + self.w
     }
 
+    #[must_use]
     pub const fn bottom(self) -> i32 {
         self.y + self.h
     }
 
+    #[must_use]
     pub const fn is_empty(self) -> bool {
         self.w <= 0 || self.h <= 0
     }
 
+    #[must_use]
     pub const fn contains(self, x: i32, y: i32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
 
+    #[must_use]
     pub fn intersect(self, other: Self) -> Option<Self> {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);
@@ -88,6 +97,7 @@ impl Rect {
         (!r.is_empty()).then_some(r)
     }
 
+    #[must_use]
     pub fn union(self, other: Self) -> Self {
         let x = self.x.min(other.x);
         let y = self.y.min(other.y);
@@ -309,6 +319,7 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
         }
     }
 
+    #[must_use]
     pub fn find(&self, name: &str) -> Option<&Shot<C>> {
         self.shots.iter().find(|s| s.name.eq_ignore_ascii_case(name))
     }
@@ -401,6 +412,7 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
         self.stitch(&self.names())
     }
 
+    #[must_use]
     pub fn names(&self) -> Vec<String> {
         self.shots.iter().map(|s| s.name.clone()).collect()
     }

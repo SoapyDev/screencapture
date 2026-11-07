@@ -75,6 +75,7 @@ pub struct Selection {
 
 impl Request {
     /// Whether capturing this needs `monitor`; skipping the others saves copy time.
+    #[must_use]
     pub fn needs(&self, monitor: &MonitorInfo) -> bool {
         match self {
             Self::Region(rect) => rect.intersect(monitor.rect).is_some(),
@@ -86,6 +87,7 @@ impl Request {
 }
 
 impl Selection {
+    #[must_use]
     pub fn new(mode: Mode, mut monitors: Vec<MonitorInfo>) -> Self {
         monitors.sort_by_key(|m| (m.rect.x, m.rect.y));
         Self {
@@ -98,6 +100,7 @@ impl Selection {
         }
     }
 
+    #[must_use]
     pub fn monitors(&self) -> &[MonitorInfo] {
         &self.monitors
     }
@@ -196,6 +199,7 @@ impl Selection {
     }
 
     /// Every screen picked (what "All screens" does).
+    #[must_use]
     pub fn is_all(&self) -> bool {
         self.mode == Mode::Screens && self.monitors.iter().all(|m| self.is_picked(&m.name))
     }
@@ -223,6 +227,7 @@ impl Selection {
     }
 
     /// The region as currently shown: live while dragging, else the committed one.
+    #[must_use]
     pub fn region(&self) -> Option<Rect> {
         match self.drag {
             Some(Drag::New { start, end, .. }) => self.clamp(Rect::from_corners(start, end)),
@@ -231,15 +236,18 @@ impl Selection {
         }
     }
 
+    #[must_use]
     pub const fn pointer(&self) -> Option<(i32, i32)> {
         self.pointer
     }
 
+    #[must_use]
     pub const fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
 
     /// What a press at this point would grab.
+    #[must_use]
     pub fn hit(&self, x: i32, y: i32) -> Hit {
         let Some(r) = self.region else { return Hit::Outside };
         let s = HANDLE_SLOP;
@@ -286,11 +294,13 @@ impl Selection {
         }
     }
 
+    #[must_use]
     pub fn is_picked(&self, name: &str) -> bool {
         self.picked.iter().any(|n| n == name)
     }
 
     /// Monitor under the pointer, for hover highlight and toolbar placement.
+    #[must_use]
     pub fn hovered(&self) -> Option<&MonitorInfo> {
         let (x, y) = self.pointer?;
         self.monitor_at(x, y)
