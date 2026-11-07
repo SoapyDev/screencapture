@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     capture::Rect,
+    record::{command::Command as RecordCommand, plan::Target, settings::Overrides},
     selection::{Mode, Request},
 };
 
@@ -35,10 +36,35 @@ pub enum Command {
     All,
     /// List screens and their geometry.
     List,
+    /// Record a video: the focused screen, unless told otherwise. Runs until
+    /// `screencapture record stop` (or Ctrl+C when no daemon runs).
+    Record {
+        #[command(subcommand)]
+        what: Option<RecordWhat>,
+        #[command(flatten)]
+        overrides: Overrides,
+    },
     /// Stay resident so the overlay opens instantly (start it with your session, e.g.
     /// Hyprland `exec-once = screencapture daemon`). Other invocations use it automatically.
     #[cfg(unix)]
     Daemon,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RecordWhat {
+    /// Every screen.
+    All,
+    /// The named screens; the focused one with no names.
+    Screen { names: Vec<String> },
+    /// A region given as "X,Y `WxH`" in logical desktop pixels (slurp format).
+    Region {
+        #[arg(short, long, value_parser = Rect::parse)]
+        geometry: Rect,
+    },
+    /// Stop the recording and save it.
+    Stop,
+    /// Record the focused screen, or stop if a recording runs: one key for both.
+    Toggle,
 }
 
 /// What a command line asks for.
@@ -48,6 +74,7 @@ pub enum Plan {
     Capture(Request),
     List,
     Daemon,
+    Record(RecordCommand),
 }
 
 impl Cli {
@@ -60,9 +87,25 @@ impl Cli {
             // Empty list means "every screen", resolved once the monitors are known.
             Some(Command::All) => Plan::Capture(Request::Screens(Vec::new())),
             Some(Command::List) => Plan::List,
+            Some(Command::Record { what, overrides }) => Plan::Record(record_command(what.as_ref(), *overrides)),
             #[cfg(unix)]
             Some(Command::Daemon) => Plan::Daemon,
         }
+    }
+}
+
+fn record_command(what: Option<&RecordWhat>, overrides: Overrides) -> RecordCommand {
+    let target = match what {
+        None | Some(RecordWhat::Toggle) => Target::Focused,
+        Some(RecordWhat::Screen { names }) if names.is_empty() => Target::Focused,
+        Some(RecordWhat::Screen { names }) => Target::Screens(names.clone()),
+        Some(RecordWhat::All) => Target::All,
+        Some(RecordWhat::Region { geometry }) => Target::Region(*geometry),
+        Some(RecordWhat::Stop) => return RecordCommand::Stop,
+    };
+    match what {
+        Some(RecordWhat::Toggle) => RecordCommand::Toggle(target, overrides),
+        _ => RecordCommand::Start(target, overrides),
     }
 }
 
@@ -112,6 +155,45 @@ mod tests {
     #[test]
     fn daemon_command() {
         assert_eq!(plan(&["daemon"]), Plan::Daemon);
+    }
+
+    #[test]
+    fn record_targets() {
+        let start = |t| Plan::Record(RecordCommand::Start(t, Overrides::default()));
+        assert_eq!(plan(&["record"]), start(Target::Focused));
+        assert_eq!(plan(&["record", "screen"]), start(Target::Focused));
+        assert_eq!(plan(&["record", "all"]), start(Target::All));
+        assert_eq!(
+            plan(&["record", "screen", "DP-1", "DP-2"]),
+            start(Target::Screens(vec!["DP-1".into(), "DP-2".into()]))
+        );
+        assert_eq!(
+            plan(&["record", "region", "-g", "10,20 300x400"]),
+            start(Target::Region(Rect::new(10, 20, 300, 400)))
+        );
+        assert_eq!(plan(&["record", "stop"]), Plan::Record(RecordCommand::Stop));
+        assert_eq!(
+            plan(&["record", "toggle"]),
+            Plan::Record(RecordCommand::Toggle(Target::Focused, Overrides::default()))
+        );
+    }
+
+    #[test]
+    fn record_settings_can_follow_the_target() {
+        use crate::record::settings::{Audio, Format, Fps, Quality, Resolution};
+        let expected = Overrides {
+            fps: Some(Fps::F30),
+            resolution: Some(Resolution::P1080),
+            format: Some(Format::H264),
+            quality: Some(Quality::High),
+            audio: Some(Audio::Both),
+        };
+        let args = ["--fps", "30", "--resolution", "1080p", "--format", "h264", "--quality", "high", "--audio", "both"];
+        let after: Vec<&str> = ["record", "all"].into_iter().chain(args).collect();
+        assert_eq!(plan(&after), Plan::Record(RecordCommand::Start(Target::All, expected)));
+        let before: Vec<&str> = std::iter::once("record").chain(args).chain(["all"]).collect();
+        assert_eq!(plan(&before), Plan::Record(RecordCommand::Start(Target::All, expected)));
+        assert!(Cli::try_parse_from(["screencapture", "record", "--fps", "7"]).is_err());
     }
 
     #[test]

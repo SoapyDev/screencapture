@@ -34,6 +34,9 @@ it starts without one.
 - **At least one font** installed: text boxes are drawn with the system fonts.
 - **Optional**: `wl-clipboard` (`wl-copy`) on Wayland, or `xclip` on X11, for clipboard copy
   when no daemon is running. With the daemon on a wlroots compositor, none is needed.
+- **For recording** (Linux): [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/about/)
+  (GPU capture and encoding; recommended), or `wf-recorder` as a fallback (CPU encoding).
+  `ffmpeg` for GIFs. Adaptive frame rate reads NVIDIA load through `nvidia-smi`.
 
 ### Building
 
@@ -108,6 +111,47 @@ screens, each screen's part of a drawing lands where that screen lands.
 When several screens are stitched they keep their layout, but empty bands between them (e.g. an
 unpicked screen in the middle) are removed. Screens with different scales are rendered at the
 highest density.
+
+## Recording
+
+```sh
+screencapture record                          # the focused screen, until stopped
+screencapture record screen DP-1              # a named screen
+screencapture record region -g "100,200 640x480"
+screencapture record all                      # every screen (one screen only, for now)
+screencapture record stop                     # finish; prints the file
+screencapture record toggle                   # start the focused screen, or stop: one key for both
+```
+
+Videos go to `~/Videos/Screencapture` (`screencast_<timestamp>.mp4`); `record … -o DIR` changes
+and remembers that folder, separately from the screenshot folder. With the daemon running it
+records; without, the `record` command itself records until `record stop` or Ctrl+C. While a
+recording runs, Print (the overlay) does nothing but say so.
+
+Settings, remembered under `"record"` in the config file and overridable per recording:
+
+| Option | Values (default first) |
+|---|---|
+| `--fps` | `native` (the screen's refresh rate), `adaptive`, `120`, `60`, `30`, `15` |
+| `--resolution` | `native`, `1440p`, `1080p`, `720p`, `480p` (largest height; scaled on the GPU while recording) |
+| `--format` | `av1`, `h264`, `hevc` (all MP4), `gif` |
+| `--quality` | `very-high`, `ultra`, `high`, `medium` |
+| `--audio` | `off`, `output` (what the computer plays), `input` (microphone), `both` |
+
+- Fixed rates never exceed the screen's refresh rate. `adaptive` reads CPU and GPU load once at
+  the start (idle: the screen's rate; busy: 60, 30 or 15) and only takes frames when the screen
+  changes.
+- H.264 plays everywhere but stops at 4096 px across; wider recordings switch to AV1, and past
+  8192 px (AV1/HEVC's limit) they are scaled down to fit. You are told when either happens.
+- GIFs are recorded at most 25 fps and 1280 px wide, then converted with one palette at stop.
+- A 3 px band is left out wherever the recording touches a screen edge with no screen beyond
+  it: that is where the red recording frame will go, so it never appears in the video.
+
+Hyprland binds, for example:
+
+```lua
+hl.bind("SUPER + Print", hl.dsp.exec_cmd("/home/you/.local/bin/screencapture record toggle"))
+```
 
 ## Latency
 

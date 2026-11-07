@@ -8,11 +8,8 @@ use chrono::{DateTime, Local};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 
-/// `screenshot_2026-11-06_14-35-38.123.png`: sorts chronologically, safe on every filesystem.
-pub fn file_name(time: DateTime<Local>) -> String {
-    format!("screenshot_{}.png", stamp(time))
-}
-
+/// `2026-11-06_14-35-38.123`, as in `screenshot_2026-11-06_14-35-38.123.png`: sorts
+/// chronologically, safe on every filesystem.
 fn stamp(time: DateTime<Local>) -> String {
     time.format("%Y-%m-%d_%H-%M-%S%.3f").to_string()
 }
@@ -46,34 +43,12 @@ pub struct Saved {
 /// Encode `image` as PNG into `dir` (created if missing) under a timestamped name. If that name
 /// is taken, `_1`, `_2`, ... is appended; existing files are never overwritten.
 pub fn save_png(image: &RgbaImage, dir: &Path, time: DateTime<Local>) -> Result<Saved> {
-    use std::{
-        fs::OpenOptions,
-        io::{ErrorKind, Write},
-    };
-
-    use anyhow::Context;
+    use std::io::Write;
 
     // Encoded once, in memory: the same bytes go to the file and the clipboard.
     let mut png = Vec::with_capacity(image.as_raw().len() / 4);
     write_png(image, &mut png)?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let base = format!("screenshot_{}", stamp(time));
-    let (path, file) = (0_u32..)
-        .map(|n| {
-            if n == 0 {
-                dir.join(file_name(time))
-            } else {
-                dir.join(format!("{base}_{n}.png"))
-            }
-        })
-        .find_map(
-            |path| match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => Some(Ok((path, file))),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
-                Err(e) => Some(Err(e).with_context(|| format!("creating {}", path.display()))),
-            },
-        )
-        .expect("unbounded name search")?;
+    let (path, file) = reserve(dir, "screenshot", "png", time)?;
 
     let mut file = file;
     if let Err(e) = file.write_all(&png) {
@@ -94,6 +69,11 @@ pub struct Config {
     /// Last colour chosen in the picker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_color: Option<String>,
+    /// Where recordings go; `~/Videos/Screencapture` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub record: crate::record::settings::Settings,
 }
 
 impl Config {
@@ -151,6 +131,45 @@ impl Config {
             .or_else(|| self.output_dir.clone())
             .unwrap_or_else(default_output_dir)
     }
+
+    /// Where to save recordings: explicit choice, else remembered, else `~/Videos/Screencapture`.
+    pub fn video_dir(&self, explicit: Option<&Path>) -> PathBuf {
+        explicit
+            .map(Path::to_path_buf)
+            .or_else(|| self.video_dir.clone())
+            .unwrap_or_else(default_video_dir)
+    }
+}
+
+/// Create a new, empty file in `dir` (created if missing) named `<prefix>_<timestamp>.<ext>`,
+/// with `_1`, `_2`, ... appended if taken. Existing files are never touched.
+pub fn reserve(dir: &Path, prefix: &str, ext: &str, time: DateTime<Local>) -> Result<(PathBuf, std::fs::File)> {
+    use std::{fs::OpenOptions, io::ErrorKind};
+
+    use anyhow::Context;
+
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let base = format!("{prefix}_{}", stamp(time));
+    (0_u32..)
+        .map(|n| match n {
+            0 => dir.join(format!("{base}.{ext}")),
+            n => dir.join(format!("{base}_{n}.{ext}")),
+        })
+        .find_map(
+            |path| match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => Some(Ok((path, file))),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e).with_context(|| format!("creating {}", path.display()))),
+            },
+        )
+        .expect("unbounded name search")
+}
+
+pub fn default_video_dir() -> PathBuf {
+    dirs::video_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Videos")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Screencapture")
 }
 
 pub fn default_output_dir() -> PathBuf {
@@ -171,11 +190,6 @@ mod tests {
 
     fn image() -> RgbaImage {
         RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
-    }
-
-    #[test]
-    fn name_is_timestamped_with_milliseconds() {
-        assert_eq!(file_name(time()), "screenshot_2026-11-06_14-05-09.042.png");
     }
 
     #[test]
@@ -224,6 +238,47 @@ mod tests {
     }
 
     #[test]
+    fn reserved_names_carry_their_prefix_and_extension_and_never_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, _) = reserve(dir.path(), "screencast", "mp4", time()).unwrap();
+        let (second, _) = reserve(dir.path(), "screencast", "mp4", time()).unwrap();
+        assert_eq!(first.file_name().unwrap(), "screencast_2026-11-06_14-05-09.042.mp4");
+        assert_eq!(second.file_name().unwrap(), "screencast_2026-11-06_14-05-09.042_1.mp4");
+        assert!(first.exists() && second.exists(), "reserved on disk");
+    }
+
+    #[test]
+    fn videos_have_their_own_folder() {
+        let config = Config {
+            output_dir: Some("/shots".into()),
+            ..Config::default()
+        };
+        assert_eq!(config.video_dir(None), default_video_dir());
+        assert!(default_video_dir().ends_with("Videos/Screencapture") || default_video_dir().ends_with("Screencapture"));
+        let config = Config {
+            video_dir: Some("/clips".into()),
+            ..config
+        };
+        assert_eq!(config.video_dir(None), Path::new("/clips"));
+        assert_eq!(config.video_dir(Some(Path::new("/now"))), Path::new("/now"));
+    }
+
+    #[test]
+    fn recording_settings_are_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = Config {
+            record: crate::record::settings::Settings {
+                fps: crate::record::settings::Fps::F30,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        config.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), config);
+    }
+
+    #[test]
     fn config_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sub/config.json");
@@ -231,6 +286,7 @@ mod tests {
             output_dir: Some("/tmp/shots".into()),
             palette: Some(vec!["#123456".into()]),
             custom_color: Some("#abcdef".into()),
+            ..Config::default()
         };
         config.save_to(&path).unwrap();
         assert_eq!(Config::load_from(&path), config);

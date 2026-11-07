@@ -351,6 +351,7 @@ mod tests {
                 name: (*name).into(),
                 rect: Rect::new(i as i32 * 100, 0, 100, 50),
                 output_position: (i as i32 * 100, 0),
+                refresh_mhz: None,
             })
             .collect()
     }
@@ -559,6 +560,7 @@ mod tests {
             name: name.into(),
             rect,
             output_position: (rect.x, rect.y),
+            refresh_mhz: None,
         };
         Selection::new(
             Mode::Region,

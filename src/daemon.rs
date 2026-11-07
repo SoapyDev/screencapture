@@ -2,8 +2,9 @@
 //! ones ~15 ms. `screencapture daemon` pays that once; later invocations hand their request
 //! to it over a Unix socket so the overlay appears almost immediately.
 //!
-//! Protocol: the client sends one line (`region` or `screens`), the daemon answers one line
-//! when done: `saved <path>`, `cancelled`, `busy` or `error <message>`.
+//! Protocol: the client sends one line (`region`, `screens`, or `record <command>`), the daemon
+//! answers with any number of `note <text>` lines, then one reply line when done: `saved <path>`,
+//! `cancelled`, `busy`, `recording <path>`, `not-recording` or `error <message>`.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -20,7 +21,40 @@ pub enum Reply {
     Saved(PathBuf),
     Cancelled,
     Busy,
+    /// A recording runs into this file (just started, or the reason nothing else can start).
+    Recording(PathBuf),
+    NotRecording,
     Error(String),
+}
+
+/// What a client asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Overlay(Mode),
+    Record(crate::record::command::Command),
+}
+
+impl Request {
+    pub fn encode(&self) -> String {
+        match self {
+            Self::Overlay(mode) => encode_mode(*mode).into(),
+            Self::Record(command) => format!("record {}", command.encode()),
+        }
+    }
+
+    pub fn parse(line: &str) -> Option<Self> {
+        match line.trim().split_once(' ') {
+            Some(("record", command)) => crate::record::command::Command::parse(command).map(Self::Record),
+            _ => parse_mode(line).map(Self::Overlay),
+        }
+    }
+}
+
+/// A reply and the notes that came before it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub reply: Reply,
+    pub notes: Vec<String>,
 }
 
 pub const fn encode_mode(mode: Mode) -> &'static str {
@@ -44,6 +78,8 @@ impl Reply {
             Self::Saved(path) => format!("saved {}", path.display()),
             Self::Cancelled => "cancelled".into(),
             Self::Busy => "busy".into(),
+            Self::Recording(path) => format!("recording {}", path.display()),
+            Self::NotRecording => "not-recording".into(),
             // One line per reply.
             Self::Error(message) => format!("error {}", message.replace('\n', " ")),
         }
@@ -56,6 +92,8 @@ impl Reply {
             "saved" if !rest.is_empty() => Self::Saved(rest.into()),
             "cancelled" => Self::Cancelled,
             "busy" => Self::Busy,
+            "recording" if !rest.is_empty() => Self::Recording(rest.into()),
+            "not-recording" => Self::NotRecording,
             "error" => Self::Error(rest.into()),
             _ => return None,
         })
@@ -73,24 +111,44 @@ pub fn socket_path() -> PathBuf {
 
 /// Ask a running daemon to show the overlay. `None` when no daemon listens at `path`.
 pub fn request(path: &Path, mode: Mode) -> Option<Result<Reply>> {
+    send(path, &Request::Overlay(mode)).map(|answer| answer.map(|a| a.reply))
+}
+
+/// Hand `request` to a running daemon and wait for its answer. `None` when no daemon listens
+/// at `path`.
+pub fn send(path: &Path, request: &Request) -> Option<Result<Answer>> {
     // Anyone who could write that directory could be impersonating the daemon.
     check_private_dir(path.parent()?).ok()?;
     let mut stream = UnixStream::connect(path).ok()?;
     Some((|| {
-        writeln!(stream, "{}", encode_mode(mode))?;
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line)?;
-        Reply::parse(&line).ok_or_else(|| anyhow::anyhow!("daemon sent an unexpected reply: {line:?}"))
+        writeln!(stream, "{}", request.encode())?;
+        let mut notes = Vec::new();
+        for line in BufReader::new(stream).lines() {
+            let line = line?;
+            if let Some(note) = line.strip_prefix("note ") {
+                notes.push(note.to_string());
+                continue;
+            }
+            let reply =
+                Reply::parse(&line).ok_or_else(|| anyhow::anyhow!("daemon sent an unexpected reply: {line:?}"))?;
+            return Ok(Answer { reply, notes });
+        }
+        anyhow::bail!("the daemon hung up without answering")
     })())
 }
 
 /// A request received by the daemon; answer it with [`Pending::reply`].
 pub struct Pending {
-    pub mode: Mode,
+    pub request: Request,
     stream: UnixStream,
 }
 
 impl Pending {
+    /// Something the user should hear about, ahead of the reply.
+    pub fn note(&mut self, text: &str) {
+        let _ = writeln!(self.stream, "note {}", text.replace('\n', " "));
+    }
+
     pub fn reply(mut self, reply: &Reply) {
         let _ = writeln!(self.stream, "{}", reply.encode());
     }
@@ -157,31 +215,35 @@ pub fn serve(
             idled = true;
             continue;
         }
-        let Ok((stream, _)) = listener.accept() else {
-            continue;
-        };
+        let Some(pending) = accept(listener) else { continue };
         idled = false;
-        let mut line = String::new();
-        let Ok(reader) = stream.try_clone() else { continue };
-        // A client that connects and says nothing must not hold up everyone else.
-        let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
-        if BufReader::new(reader).read_line(&mut line).is_err() {
-            continue;
-        }
-        let _ = stream.set_read_timeout(None);
-        match parse_mode(&line) {
-            Some(mode) => handle(Pending { mode, stream }),
-            None => Pending {
-                mode: Mode::Region,
-                stream,
-            }
-            .reply(&Reply::Error(format!("unknown request {line:?}"))),
-        }
+        handle(pending);
     }
 }
 
+/// Take the next client's request (blocks until one connects); malformed ones are answered
+/// here and give `None`.
+pub fn accept(listener: &UnixListener) -> Option<Pending> {
+    let (stream, _) = listener.accept().ok()?;
+    let mut line = String::new();
+    let reader = stream.try_clone().ok()?;
+    // A client that connects and says nothing must not hold up everyone else.
+    let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
+    BufReader::new(reader).read_line(&mut line).ok()?;
+    let _ = stream.set_read_timeout(None);
+    if let Some(request) = Request::parse(&line) {
+        return Some(Pending { request, stream });
+    }
+    Pending {
+        request: Request::Overlay(Mode::Region),
+        stream,
+    }
+    .reply(&Reply::Error(format!("unknown request {line:?}")));
+    None
+}
+
 /// Whether a client knocks on `listener` within `wait`.
-fn readable_within(listener: &UnixListener, wait: std::time::Duration) -> bool {
+pub fn readable_within(listener: &UnixListener, wait: std::time::Duration) -> bool {
     use rustix::event::{PollFd, PollFlags, Timespec};
     let deadline = std::time::Instant::now() + wait;
     loop {
@@ -214,11 +276,53 @@ mod tests {
     }
 
     #[test]
+    fn requests_round_trip() {
+        use crate::record::{command::Command, plan::Target, settings::Overrides};
+        for request in [
+            Request::Overlay(Mode::Region),
+            Request::Overlay(Mode::Screens),
+            Request::Record(Command::Stop),
+            Request::Record(Command::Start(Target::All, Overrides::default())),
+        ] {
+            assert_eq!(Request::parse(&request.encode()), Some(request));
+        }
+        assert_eq!(encode_mode(Mode::Region), Request::Overlay(Mode::Region).encode(), "old clients");
+        assert_eq!(Request::parse("record dance"), None);
+        assert_eq!(Request::parse("dance"), None);
+    }
+
+    #[test]
+    fn notes_arrive_before_the_reply() {
+        use crate::record::command::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run").join("d.sock");
+        let listener = bind(&path).unwrap();
+        std::thread::spawn(move || {
+            serve(&listener, None, || {}, |mut pending| {
+                assert_eq!(pending.request, Request::Record(Command::Stop));
+                pending.note("first");
+                pending.note("two\nlines");
+                pending.reply(&Reply::NotRecording);
+            });
+        });
+        let answer = send(&path, &Request::Record(Command::Stop)).unwrap().unwrap();
+        assert_eq!(
+            answer,
+            Answer {
+                reply: Reply::NotRecording,
+                notes: vec!["first".into(), "two lines".into()],
+            }
+        );
+    }
+
+    #[test]
     fn replies_round_trip() {
         for reply in [
             Reply::Saved("/tmp/a b/screenshot.png".into()),
             Reply::Cancelled,
             Reply::Busy,
+            Reply::Recording("/v/a b.mp4".into()),
+            Reply::NotRecording,
             Reply::Error("it broke".into()),
         ] {
             assert_eq!(Reply::parse(&reply.encode()), Some(reply));
@@ -243,9 +347,9 @@ mod tests {
                 None,
                 || {},
                 |pending| {
-                    let reply = match pending.mode {
-                        Mode::Region => Reply::Saved("/x.png".into()),
-                        Mode::Screens => Reply::Cancelled,
+                    let reply = match pending.request {
+                        Request::Overlay(Mode::Region) => Reply::Saved("/x.png".into()),
+                        _ => Reply::Cancelled,
                     };
                     pending.reply(&reply);
                 },

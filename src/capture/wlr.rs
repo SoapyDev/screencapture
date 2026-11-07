@@ -31,6 +31,8 @@ struct Output {
     name: Option<String>,
     position: (i32, i32),
     mode_size: (i32, i32),
+    /// mHz.
+    refresh: i32,
     scale: i32,
     transform: Transform,
     logical_position: Option<(i32, i32)>,
@@ -55,6 +57,7 @@ impl Output {
             name: self.name.clone().unwrap_or_else(|| format!("output-{index}")),
             rect: Rect::new(x, y, w, h),
             output_position: self.position,
+            refresh_mhz: u32::try_from(self.refresh).ok().filter(|&r| r > 0),
         }
     }
 }
@@ -599,9 +602,10 @@ impl Dispatch<wl_output::WlOutput, usize> for State {
                 flags: WEnum::Value(flags),
                 width,
                 height,
-                ..
+                refresh,
             } if flags.contains(wl_output::Mode::Current) => {
                 output.mode_size = (width, height);
+                output.refresh = refresh;
             }
             wl_output::Event::Scale { factor } => output.scale = factor,
             wl_output::Event::Name { name } => output.name = Some(name),

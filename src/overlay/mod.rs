@@ -202,9 +202,38 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .map_or(RELEASE_BUFFERS_AFTER, std::time::Duration::from_secs);
-            daemon::serve(&listener, Some(release_after), quiet, |pending| {
+            // Recordings run beside the overlay's machinery, on this thread.
+            #[cfg(target_os = "linux")]
+            let mut recorder = crate::record::Recorder::default();
+            daemon::serve(&listener, Some(release_after), quiet, |mut pending| {
                 crate::trace_restart();
                 trace("request received");
+                #[cfg(target_os = "linux")]
+                {
+                    if let daemon::Request::Record(command) = pending.request.clone() {
+                        // Never record the frozen overlay.
+                        if command.starts() && recorder.recording().is_none() && GATE.is_open() {
+                            pending.reply(&daemon::Reply::Busy);
+                            return;
+                        }
+                        let (reply, notes) = recorder.run(command, &mut crate::record::LiveEnv).reply();
+                        for note in &notes {
+                            pending.note(note);
+                        }
+                        pending.reply(&reply);
+                        return;
+                    }
+                    // Print while recording: say so, and leave the screen alone.
+                    if let Some(path) = recorder.recording() {
+                        pending.reply(&daemon::Reply::Recording(path));
+                        return;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                if matches!(pending.request, daemon::Request::Record(_)) {
+                    pending.reply(&daemon::Reply::Error("recording needs Linux".into()));
+                    return;
+                }
                 match GATE.enter(std::time::Instant::now()) {
                     gate::Entry::Busy => {
                         pending.reply(&daemon::Reply::Busy);
@@ -235,7 +264,12 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
 #[cfg(unix)]
 fn serve_request(pending: daemon::Pending, frozen: anyhow::Result<Frozen>, config: Config, cx: &mut App) {
     match frozen {
-        Ok(frozen) => start(pending.mode, frozen, config, Some(pending), true, cx),
+        Ok(frozen) => {
+            let daemon::Request::Overlay(mode) = pending.request else {
+                unreachable!("only overlay requests reach the UI thread")
+            };
+            start(mode, frozen, config, Some(pending), true, cx);
+        }
         Err(e) => {
             GATE.abort();
             pending.reply(&daemon::Reply::Error(format!("{e:#}")));

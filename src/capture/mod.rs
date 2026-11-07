@@ -128,6 +128,8 @@ pub struct MonitorInfo {
     /// Position the windowing system reports for the output (`wl_output.geometry` on Wayland),
     /// which is what gpui uses as the display origin. Used to match gpui displays to monitors.
     pub output_position: (i32, i32),
+    /// Refresh rate in mHz, when the windowing system says.
+    pub refresh_mhz: Option<u32>,
 }
 
 /// Native Wayland capture, unless `SCREENCAPTURE_BACKEND=xcap` forces the portable one.
@@ -244,6 +246,7 @@ impl<C: Deref<Target = [u8]>> Shot<C> {
             name: self.name.clone(),
             rect: self.rect,
             output_position: self.output_position,
+            refresh_mhz: None,
         }
     }
 
@@ -511,12 +514,14 @@ mod tests {
                 MonitorInfo {
                     name: "A".into(),
                     rect: Rect::new(0, 0, 100, 50),
-                    output_position: (0, 0)
+                    output_position: (0, 0),
+                    refresh_mhz: None,
                 },
                 MonitorInfo {
                     name: "B".into(),
                     rect: Rect::new(100, 0, 100, 50),
-                    output_position: (200, 0)
+                    output_position: (200, 0),
+                    refresh_mhz: None,
                 },
             ]
         );

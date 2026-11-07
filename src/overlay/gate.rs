@@ -60,6 +60,11 @@ impl Gate {
         state.settled_at = Some(now + SETTLE);
     }
 
+    /// Whether an overlay is open (recording must not start under it).
+    pub fn is_open(&self) -> bool {
+        self.state().open
+    }
+
     /// The request ended before any overlay showed.
     pub fn abort(&self) {
         self.state().open = false;
@@ -94,6 +99,16 @@ mod tests {
         );
         gate.leave(soon);
         assert_eq!(gate.enter(soon + SETTLE * 2), Entry::Go { wait: Duration::ZERO });
+    }
+
+    #[test]
+    fn open_while_entered() {
+        let gate = Gate::new();
+        assert!(!gate.is_open());
+        gate.enter(Instant::now());
+        assert!(gate.is_open());
+        gate.leave(Instant::now());
+        assert!(!gate.is_open());
     }
 
     #[test]

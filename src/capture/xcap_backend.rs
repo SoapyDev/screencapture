@@ -11,6 +11,7 @@ fn info(monitor: &Monitor) -> Result<MonitorInfo> {
         name: monitor.name()?,
         rect: Rect::new(x, y, monitor.width()? as i32, monitor.height()? as i32),
         output_position: (x, y),
+        refresh_mhz: monitor.frequency().ok().map(|hz| (hz * 1000.).round() as u32).filter(|&r| r > 0),
     })
 }
 

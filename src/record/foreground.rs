@@ -1,0 +1,144 @@
+//! Recording without the daemon: this process records, and takes the daemon's place on the
+//! socket until the recording ends, so `screencapture record stop` (and Print, which is told a
+//! recording runs) work the same.
+
+use std::{
+    os::unix::net::UnixListener,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
+
+use super::{Env, Outcome, Recorder, command::Command};
+use crate::daemon::{self, Reply, Request};
+
+/// Set by Ctrl+C, SIGTERM or SIGHUP.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, Ordering::Relaxed);
+}
+
+/// Record `command` (a start), in this process, until told to stop. Prints how to stop it.
+pub fn run(command: Command, socket: &Path) -> anyhow::Result<Outcome> {
+    let listener = daemon::bind(socket)?;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::signal(signal, on_signal as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t);
+        }
+    }
+    let mut recorder = Recorder::default();
+    let outcome = match recorder.run(command, &mut super::LiveEnv) {
+        Outcome::Started { path, notes } => {
+            for note in notes {
+                eprintln!("screencapture: {note}");
+            }
+            eprintln!(
+                "screencapture: recording to {} (Ctrl+C or `screencapture record stop` ends it)",
+                path.display()
+            );
+            serve(&listener, &mut recorder, &mut super::LiveEnv, &STOP)
+        }
+        other => other,
+    };
+    let _ = std::fs::remove_file(socket);
+    Ok(outcome)
+}
+
+/// Answer clients while the recording runs; returns how it ended.
+fn serve(listener: &UnixListener, recorder: &mut Recorder, env: &mut impl Env, stop: &AtomicBool) -> Outcome {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return recorder.run(Command::Stop, env);
+        }
+        if let Some(outcome) = recorder.ended_by_itself() {
+            return outcome;
+        }
+        if !daemon::readable_within(listener, Duration::from_millis(100)) {
+            continue;
+        }
+        let Some(mut pending) = daemon::accept(listener) else {
+            continue;
+        };
+        let (outcome, ends) = match pending.request.clone() {
+            Request::Record(command @ Command::Start(..)) => (recorder.run(command, env), false),
+            Request::Record(Command::Stop | Command::Toggle(..)) => (recorder.run(Command::Stop, env), true),
+            Request::Overlay(_) => {
+                pending.reply(&Reply::Recording(recorder.recording().unwrap_or_default()));
+                continue;
+            }
+        };
+        let (reply, notes) = outcome.clone().reply();
+        for note in &notes {
+            pending.note(note);
+        }
+        pending.reply(&reply);
+        if ends {
+            return outcome;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::{control::testing::Fake, plan::Target, settings::Overrides};
+    use std::sync::Arc;
+
+    fn recording() -> (tempfile::TempDir, std::path::PathBuf, UnixListener, Recorder, Fake) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("run").join("d.sock");
+        let listener = daemon::bind(&socket).unwrap();
+        let mut env = Fake::new();
+        let mut recorder = Recorder::default();
+        let started = recorder.run(Command::Start(Target::Focused, Overrides::default()), &mut env);
+        assert!(matches!(started, Outcome::Started { .. }));
+        (dir, socket, listener, recorder, env)
+    }
+
+    #[test]
+    fn a_stop_request_ends_it_and_gets_the_file() {
+        let (_dir, socket, listener, mut recorder, mut env) = recording();
+        let path = recorder.recording().unwrap();
+        let client = std::thread::spawn(move || {
+            let print = daemon::request(&socket, crate::selection::Mode::Region).unwrap().unwrap();
+            let start = daemon::send(&socket, &Request::Record(Command::Start(Target::All, Overrides::default())));
+            let stop = daemon::send(&socket, &Request::Record(Command::Stop)).unwrap().unwrap();
+            (print, start.unwrap().unwrap().reply, stop.reply)
+        });
+        let outcome = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
+        let (print, start, stop) = client.join().unwrap();
+        assert_eq!(print, Reply::Recording(path.clone()), "Print is told a recording runs");
+        assert_eq!(start, Reply::Busy);
+        assert_eq!(stop, Reply::Saved(path.clone()));
+        assert_eq!(outcome, Outcome::Saved(path.clone()));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_signal_ends_it() {
+        let (_dir, _socket, listener, mut recorder, mut env) = recording();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::Relaxed);
+        });
+        assert!(matches!(serve(&listener, &mut recorder, &mut env, &stop), Outcome::Saved(_)));
+    }
+
+    #[test]
+    fn a_recorder_quitting_by_itself_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = daemon::bind(&dir.path().join("run").join("d.sock")).unwrap();
+        let mut env = Fake::new();
+        env.script = r#"out="$1"; echo data > "$out"; : > "$out.ts"; sleep 0.1"#;
+        let mut recorder = Recorder::default();
+        recorder.run(Command::Start(Target::Focused, Overrides::default()), &mut env);
+        assert!(matches!(
+            serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false)),
+            Outcome::Saved(_)
+        ));
+    }
+}

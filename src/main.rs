@@ -9,6 +9,7 @@ mod hyprland;
 mod job;
 mod memory;
 mod overlay;
+mod record;
 mod save;
 mod selection;
 mod text;
@@ -48,22 +49,29 @@ fn main() -> ExitCode {
     trace_restart();
     memory::tune();
     let cli = Cli::parse();
+    let plan = cli.plan();
     let mut config = Config::load();
     if let Some(dir) = &cli.output {
-        // An explicit folder becomes the remembered one.
-        config.output_dir = Some(std::path::absolute(dir).unwrap_or_else(|_| dir.clone()));
+        // An explicit folder becomes the remembered one: for videos when recording.
+        let dir = Some(std::path::absolute(dir).unwrap_or_else(|_| dir.clone()));
+        if matches!(plan, Plan::Record(_)) {
+            config.video_dir = dir;
+        } else {
+            config.output_dir = dir;
+        }
         if let Err(e) = config.save() {
             eprintln!("screencapture: could not remember folder: {e:#}");
         }
     }
 
-    let result = match cli.plan() {
+    let result = match plan {
         Plan::List => list(),
         #[cfg(unix)]
         Plan::Daemon => daemon::bind(&daemon::socket_path()).map(overlay::run_daemon),
         #[cfg(not(unix))]
         Plan::Daemon => Err(anyhow::anyhow!("daemon mode needs a Unix system")),
         Plan::Capture(request) => capture(&request, &config),
+        Plan::Record(command) => return record(command),
         Plan::Overlay(mode) => return overlay_mode(mode, config),
     };
     match result {
@@ -85,9 +93,16 @@ fn overlay_mode(mode: selection::Mode, config: Config) -> ExitCode {
                 println!("{}", path.display());
                 ExitCode::SUCCESS
             }
-            Ok(daemon::Reply::Cancelled) => ExitCode::FAILURE,
+            Ok(daemon::Reply::Cancelled | daemon::Reply::NotRecording) => ExitCode::FAILURE,
             Ok(daemon::Reply::Busy) => {
                 eprintln!("screencapture: a selection is already open");
+                ExitCode::FAILURE
+            }
+            Ok(daemon::Reply::Recording(path)) => {
+                eprintln!(
+                    "screencapture: recording to {}; `screencapture record stop` ends it",
+                    path.display()
+                );
                 ExitCode::FAILURE
             }
             Ok(daemon::Reply::Error(e)) => {
@@ -116,6 +131,74 @@ fn list() -> anyhow::Result<()> {
         println!("{}\t{},{} {}x{}", m.name, m.rect.x, m.rect.y, m.rect.w, m.rect.h);
     }
     Ok(())
+}
+
+/// Hand a recording command to the daemon; with none running, record in this process.
+fn record(command: record::command::Command) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        use record::command::Command;
+        let socket = daemon::socket_path();
+        let answer = match daemon::send(&socket, &daemon::Request::Record(command.clone())) {
+            Some(answer) => answer,
+            None if command == Command::Stop => Ok(daemon::Answer {
+                reply: daemon::Reply::NotRecording,
+                notes: Vec::new(),
+            }),
+            None => record::foreground::run(command, &socket).map(|outcome| {
+                let (reply, notes) = outcome.reply();
+                daemon::Answer { reply, notes }
+            }),
+        };
+        report_record(answer)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = command;
+        eprintln!("screencapture: recording needs Linux");
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn report_record(answer: anyhow::Result<daemon::Answer>) -> ExitCode {
+    use daemon::Reply;
+    let answer = match answer {
+        Ok(answer) => answer,
+        Err(e) => {
+            eprintln!("screencapture: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for note in &answer.notes {
+        eprintln!("screencapture: {note}");
+    }
+    match answer.reply {
+        Reply::Recording(path) => {
+            eprintln!("screencapture: recording to {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Reply::Saved(path) => {
+            println!("{}", path.display());
+            ExitCode::SUCCESS
+        }
+        Reply::NotRecording => {
+            eprintln!("screencapture: no recording is running");
+            ExitCode::FAILURE
+        }
+        Reply::Busy => {
+            // A start while recording already said why in a note.
+            if answer.notes.is_empty() {
+                eprintln!("screencapture: a selection is open; close it first");
+            }
+            ExitCode::FAILURE
+        }
+        Reply::Error(e) => {
+            eprintln!("screencapture: {e}");
+            ExitCode::FAILURE
+        }
+        Reply::Cancelled => ExitCode::FAILURE,
+    }
 }
 
 /// No-UI path: nothing but capture and encode.

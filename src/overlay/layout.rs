@@ -79,6 +79,7 @@ mod tests {
             name: name.into(),
             rect: Rect::new(x, 0, 100, 50),
             output_position: (output_x, 0),
+            refresh_mhz: None,
         }
     }
 
