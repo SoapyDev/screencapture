@@ -36,6 +36,7 @@ impl Tool {
     ];
 
     /// Shapes drawn from a box (two corners) that are hit anywhere inside.
+    #[must_use]
     pub const fn is_box(self) -> bool {
         matches!(self, Self::Text | Self::Redact)
     }
@@ -78,6 +79,7 @@ pub const REDACTED: Color = [0, 0, 0, 0xFF];
 pub const GRAB_SLOP: f32 = 6.;
 
 /// `#RRGGBB` or `#RRGGBBAA` (the `#` is optional).
+#[must_use]
 pub fn parse_color(text: &str) -> Option<Color> {
     let hex = text.trim();
     let hex = hex.strip_prefix('#').unwrap_or(hex);
@@ -90,6 +92,7 @@ pub fn parse_color(text: &str) -> Option<Color> {
 }
 
 /// Opaque colour from hue (degrees), saturation and value (0..=1), for the colour picker.
+#[must_use]
 pub fn hsv(h: f32, s: f32, v: f32) -> Color {
     let channel = |n: f32| {
         let k = (n + h / 60.) % 6.;
@@ -99,6 +102,7 @@ pub fn hsv(h: f32, s: f32, v: f32) -> Color {
     [channel(5.), channel(3.), channel(1.), 0xFF]
 }
 
+#[must_use]
 pub fn to_hex(c: Color) -> String {
     let [r, g, b, a] = c;
     if a == 0xFF {
@@ -135,6 +139,7 @@ pub struct Stroke {
 
 impl Shape {
     /// Outline geometry of the drawing tools (a counter has none: see [`Self::strokes`]).
+    #[must_use]
     pub fn polylines(&self) -> Vec<Vec<Point>> {
         let (a, b) = match self.points[..] {
             [] => return Vec::new(),
@@ -177,12 +182,14 @@ impl Shape {
     }
 
     /// Radius of a counter's disc.
+    #[must_use]
     pub const fn radius(&self) -> f32 {
         1.5_f32.mul_add(self.width, 8.)
     }
 
     /// Everything to draw, in order. The overlay and the saved image both draw from this, so
     /// they match.
+    #[must_use]
     pub fn strokes(&self) -> Vec<Stroke> {
         if self.tool.is_box() {
             return Vec::new();
@@ -240,6 +247,7 @@ impl Shape {
 
     /// Points that can be dragged to reshape: line/arrow ends, box corners (rectangle, ellipse,
     /// freehand: top-left, top-right, bottom-right, bottom-left). Counters only move.
+    #[must_use]
     pub fn handles(&self) -> Vec<Point> {
         match self.tool {
             Tool::Counter => Vec::new(),
@@ -252,6 +260,7 @@ impl Shape {
     }
 
     /// This shape with handle `i` dragged to `p`.
+    #[must_use]
     pub fn with_handle(&self, i: usize, p: Point) -> Self {
         let mut shape = self.clone();
         match self.tool {
@@ -281,10 +290,12 @@ impl Shape {
     }
 
     /// Bounding box (left, top, right, bottom) of the points.
+    #[must_use]
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
         bounds(&self.points)
     }
 
+    #[must_use]
     pub fn translated(&self, dx: f32, dy: f32) -> Self {
         let mut shape = self.clone();
         for q in &mut shape.points {
@@ -623,10 +634,12 @@ impl Annotations {
     }
 
     /// Drawing or editing in progress.
+    #[must_use]
     pub const fn is_busy(&self) -> bool {
         self.current.is_some() || self.edit.is_some()
     }
 
+    #[must_use]
     pub fn selected(&self) -> Option<&Shape> {
         self.selected.and_then(|i| self.shapes.get(i))
     }
@@ -645,6 +658,7 @@ impl Annotations {
     }
 
     /// Width shown in the stepper: the selected shape's, else the one for new shapes.
+    #[must_use]
     pub fn current_width(&self) -> f32 {
         match self.selected() {
             Some(s) => s.width,
@@ -654,6 +668,7 @@ impl Annotations {
     }
 
     /// Whether width controls currently mean font size.
+    #[must_use]
     pub fn sizing_text(&self) -> bool {
         self.selected()
             .map_or_else(|| self.tool == Some(Tool::Text), |s| s.tool == Tool::Text)
@@ -684,6 +699,7 @@ impl Annotations {
     }
 
     /// Colour shown as chosen: the selected shape's, else the one for new shapes.
+    #[must_use]
     pub fn current_color(&self) -> Color {
         if self.coloring_fill() {
             return self.current_fill().unwrap_or(self.fill_color);
@@ -718,6 +734,7 @@ impl Annotations {
         }
     }
 
+    #[must_use]
     pub fn editing(&self) -> Option<&Shape> {
         self.editing.and_then(|i| self.shapes.get(i))
     }
@@ -774,6 +791,7 @@ impl Annotations {
     }
 
     /// Background shown as chosen: the selected text box's, else the one for new boxes.
+    #[must_use]
     pub fn current_fill(&self) -> Option<Color> {
         match self.selected() {
             Some(s) if s.tool == Tool::Text => s.fill,
@@ -812,6 +830,7 @@ impl Annotations {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.shapes.is_empty() && self.current.is_none()
     }
@@ -953,6 +972,7 @@ fn segment_distance(p: Point, a: Point, b: Point) -> f32 {
 }
 
 /// Straight-alpha source-over.
+#[must_use]
 pub fn blend(dst: [u8; 4], src: Color, coverage: f32) -> [u8; 4] {
     let a = f32::from(src[3]) / 255. * coverage;
     let da = f32::from(dst[3]) / 255.;
@@ -981,10 +1001,11 @@ pub struct Palette {
     pub custom_color: Option<String>,
 }
 
-impl crate::config::Section for Palette {}
+impl screencapture_core::config::Section for Palette {}
 
 impl Palette {
     /// The configured colours that parse, else the built-in pastels.
+    #[must_use]
     pub fn colors(&self) -> Vec<Color> {
         let parsed: Vec<Color> = self
             .palette
@@ -1807,7 +1828,7 @@ mod tests {
         let path = path.path().join("config.json");
         let json = r##"{"output_dir":null,"palette":["#ff0000"],"custom_color":"#00ff00"}"##;
         std::fs::write(&path, json).expect("the folder is writable");
-        let palette: Palette = crate::config::Config::load_from(&path).section();
+        let palette: Palette = screencapture_core::config::Config::load_from(&path).section();
         assert_eq!(palette.custom_color(), Some([0, 255, 0, 255]));
     }
 }

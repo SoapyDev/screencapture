@@ -1,0 +1,19 @@
+[package]
+name = "screencapture-editing"
+description = "Drawing over the screens before a capture or a recording"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+screencapture-core.workspace = true
+cosmic-text.workspace = true
+image.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

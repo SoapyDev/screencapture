@@ -12,9 +12,6 @@ mod wlr;
 #[cfg(any(not(target_os = "linux"), feature = "x11"))]
 mod xcap_backend;
 
-#[cfg(all(target_os = "linux", not(any(feature = "wayland", feature = "x11"))))]
-compile_error!("enable at least one of the `wayland` or `x11` features");
-
 use std::ops::Deref;
 
 use anyhow::{Result, bail};
@@ -178,6 +175,9 @@ pub fn monitors() -> Result<Vec<MonitorInfo>> {
 }
 
 fn capture_shots(wanted: &dyn Fn(&MonitorInfo) -> bool) -> Result<Vec<Shot>> {
+    // Built without a backend (a feature crate's own tests): nothing asks.
+    #[cfg(all(target_os = "linux", not(any(feature = "wayland", feature = "x11"))))]
+    let _ = wanted;
     dispatch!(wlr::capture(wanted), xcap_backend::capture(wanted))
 }
 

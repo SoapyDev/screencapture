@@ -4821,6 +4821,7 @@ dependencies = [
  "lyon",
  "rustix 1.1.6",
  "screencapture-core",
+ "screencapture-editing",
  "serde",
  "serde_json",
  "signal-hook",
@@ -4849,6 +4850,17 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "xcap",
+]
+
+[[package]]
+name = "screencapture-editing"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "image",
+ "screencapture-core",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

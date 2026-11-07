@@ -1,5 +1,6 @@
-//! Text boxes: layout and rasterising with cosmic-text, shared by the overlay preview and the
-//! saved image so both wrap and look the same. Fonts are only loaded when the Text tool is
+//! Text boxes: layout and rasterising with cosmic-text.
+//!
+//! Shared by the overlay preview and the saved image, so both wrap and look the same. Fonts are only loaded when the Text tool is
 //! first used ([`preload`]), never on the capture path.
 
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
@@ -22,7 +23,7 @@ fn fonts() -> MutexGuard<'static, Fonts> {
                 system: FontSystem::new(),
                 cache: SwashCache::new(),
             };
-            crate::trace("fonts loaded");
+            screencapture_core::trace("fonts loaded");
             Mutex::new(fonts)
         })
         .lock()
@@ -56,6 +57,7 @@ pub fn preload() {
 
 /// A `w`×`h` pixel image of `text` at `size` px in `color`, wrapped to the box, on `fill`
 /// (transparent without).
+#[must_use]
 pub fn render(text: &str, size: f32, color: Color, fill: Option<Color>, w: u32, h: u32) -> RgbaImage {
     let mut image = RgbaImage::from_pixel(w.max(1), h.max(1), image::Rgba(fill.unwrap_or([0; 4])));
     if text.is_empty() {
@@ -88,6 +90,7 @@ pub fn render(text: &str, size: f32, color: Color, fill: Option<Color>, w: u32, 
 }
 
 /// Caret after the last character, as (x, y, height) in pixels from the box's top-left.
+#[must_use]
 pub fn caret(text: &str, size: f32, w: u32) -> (f32, f32, f32) {
     let pad = size * PADDING;
     let buffer = layout(&mut fonts().system, text, size, w);
