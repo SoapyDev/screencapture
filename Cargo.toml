@@ -1,0 +1,101 @@
+# Nightly-only: lets profiles carry rustflags, so polonius applies to this crate only, not deps.
+cargo-features = ["profile-rustflags"]
+
+[package]
+name = "screencapture"
+version = "0.1.0"
+edition = "2024"
+description = "Capture a region, a screen, or several screens stitched into one image"
+
+[dependencies]
+# GPUI has no recent crates.io release; track Zed's main branch, pinned to a known-good commit
+# (same as gpui-calculator). To update, change `rev` to a newer commit from main.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b" }
+# Linux display backends come from the `wayland` / `x11` features below; with neither, gpui
+# silently runs headless.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b", features = ["font-kit"] }
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+lyon = "1"
+# Same text stack gpui uses on Linux (already in the build): lays out and rasterises the Text
+# tool identically for the preview and the saved image.
+cosmic-text = "0.19"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# Linux: each display server's code is only compiled when its feature is on.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# Native backend for wlroots-style compositors (Hyprland, Sway, river...): xcap's wlroots path
+# fails on Hyprland with a wl_shm pool error.
+memmap2 = { version = "0.9", optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
+wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
+# X11 capture backend.
+xcap = { version = "0.9", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process", "event"] }
+
+# Windows and macOS always capture through xcap.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+xcap = "0.9"
+
+[features]
+default = ["wayland"]
+# Wayland: gpui's Wayland backend (layer-shell overlay) + native wlr-screencopy capture.
+wayland = [
+    "gpui_platform/wayland",
+    "dep:memmap2",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+]
+# X11: gpui's X11 backend + xcap capture.
+x11 = ["gpui_platform/x11", "dep:xcap"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+# Colours read better as plain 0xRRGGBBAA; gpui render functions are naturally long.
+unreadable_literal = "allow"
+too_many_lines = "allow"
+many_single_char_names = "allow"
+
+[profile.release]
+codegen-units = 1
+opt-level = 3
+lto = true
+panic = "abort"
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package.screencapture]
+rustflags = ["-Zpolonius=next"]
+
+[profile.release.package.screencapture]
+rustflags = ["-Zpolonius=next"]
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+# Test driver: real pointer input for checking the overlay (see examples/drive.rs).
+[[example]]
+name = "drive"
+required-features = ["wayland"]

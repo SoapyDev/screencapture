@@ -1,0 +1,193 @@
+# screencapture
+
+Screenshot tool built on [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui).
+Captures a region, one screen, or several screens stitched into one contiguous image, and saves a
+PNG with a timestamped name (`screenshot_2026-11-06_14-05-09.042.png`; a `_1`, `_2`… suffix is
+added if the name is already taken, so nothing is ever overwritten).
+
+Every capture is also copied to the clipboard as `image/png`. The daemon offers it itself
+(`zwlr_data_control_v1`, no helper process); a one-off run hands it to `wl-copy` (`xclip` on
+X11), since its own offer would vanish when it exits. `SCREENCAPTURE_NO_CLIPBOARD=1` turns it off.
+
+## Requirements
+
+### Where it runs
+
+| Desktop | Status |
+|---|---|
+| Linux, wlroots-style Wayland compositor (Hyprland, Sway, river, niri, Wayfire, labwc…) | Full support, default build: native screencopy, layer-shell overlay, native clipboard. Tested on Hyprland. |
+| KDE Plasma (Wayland) | Build with `--features x11`: KWin has no screencopy, so capture goes through xcap and the desktop portal (slower). Overlay and clipboard should work. Untested. |
+| GNOME (Wayland) | Build with `--features x11`, as above. No layer-shell, so the overlay is a fullscreen popup; the clipboard goes through `wl-copy`. Untested. |
+| X11 (any distro) | Build with `--no-default-features --features x11`. The overlay does not handle several monitors yet. |
+| macOS, Windows | Code paths exist (gpui and xcap support both), but it has never been built or run there, and there is no clipboard copy. |
+
+The overlay starts at the pointer's position only on Hyprland (read through its IPC); elsewhere
+it starts without one.
+
+### Running
+
+- **glibc**: a binary needs the glibc it was built against or newer; one built on current
+  Arch/CachyOS needs 2.44. Other distros should build from source. musl builds work, without the
+  allocator tuning that keeps the daemon's memory flat (`src/memory.rs`).
+- **libxkbcommon**: linked.
+- **A GPU driver with Vulkan or OpenGL (EGL)**: loaded at run time by wgpu.
+- **At least one font** installed: text boxes are drawn with the system fonts.
+- **Optional**: `wl-clipboard` (`wl-copy`) on Wayland, or `xclip` on X11, for clipboard copy
+  when no daemon is running. With the daemon on a wlroots compositor, none is needed.
+
+### Building
+
+- **Rust nightly**: picked up automatically from `rust-toolchain.toml` by rustup.
+- **libxkbcommon development files** (`libxkbcommon-dev` on Debian/Ubuntu, `libxkbcommon-devel`
+  on Fedora; included in the package on Arch).
+- **X11 build only**: the X11/xcb libraries xcap needs (see its documentation).
+
+```sh
+cargo build --release   # target/release/screencapture
+```
+
+## Usage
+
+```sh
+screencapture                     # overlay: drag a region (or click a screen), adjust, draw, Enter
+screencapture screen              # overlay: click screens to pick several, draw, Enter
+screencapture screen DP-1 DP-2    # no UI: these screens, stitched
+screencapture all                 # no UI: every screen, stitched
+screencapture region -g "100,200 640x480"   # no UI: region in slurp format
+screencapture list                # screen names and geometry
+screencapture daemon              # stay resident so the overlay opens instantly
+```
+
+`-o DIR` picks the folder (default `~/Pictures/Screenshots`); it is remembered in
+`~/.config/screencapture/config.json`. The overlay's folder button changes it too.
+
+The drawing palette defaults to six pastels (soft red, orange, yellow, green, blue, purple)
+plus white and black.
+Replace it in the same file; entries that don't parse are skipped, and if none do the pastels
+are used:
+
+```json
+{ "palette": ["#FF8A80", "#8EE4A1", "#8AB8FFC0"] }
+```
+The saved path is printed on stdout.
+
+The screens are **frozen** the moment the overlay opens: you select (and draw) on that still
+image, so moving content, menus or tooltips are captured exactly as they were at the trigger.
+Nothing is saved until `Enter` (or the Capture button).
+
+Selecting:
+- Region mode (`R`): drag a rectangle, or click a screen to select all of it. Drag edges or
+  corners to resize, drag inside to move, arrows nudge, `Shift`+arrows resize. A click outside
+  clears it.
+- Screens mode (`S`): click screens to toggle them. `A` picks every screen.
+- `O` changes the folder; `Esc` or right-click cancels.
+
+Drawing works for every kind of capture (region, one screen, several, all). Shapes are drawn
+over the frozen desktop and burnt into the saved PNG at its full resolution; with stitched
+screens, each screen's part of a drawing lands where that screen lands.
+- Tools: `1` rectangle, `2` ellipse, `3` line, `4` arrow, `5` freehand, `6` numbered step
+  marker (a filled disc with a white number, counting up), `7` text, `8` redact. Same key or
+  button again puts the tool down; switching Region / Screens / All screens puts it down too.
+- Text: drag a box (or click for a default one) and type; `Enter` starts a new line, `Esc`
+  finishes, double-click a box to type in it again. The wheel or stepper sets the font size.
+  "A text" / "▇ fill" choose whether the palette colours the letters or the background, and
+  "Fill on/off" toggles the background. Text wraps to the box; drag its corners to reshape.
+- Redact: drag over what must not be seen. Every pixel the box touches is replaced by opaque
+  black in the saved file — not blurred or blended, so nothing can be recovered from it.
+- Click a shape to select it: drag it to move, drag its handles to resize it (or change a
+  line's length and direction), `Delete` removes it. Clicking a shape selects it even with a tool
+  in hand.
+- Width: the `− N px +` stepper, `[` / `]`, or the mouse wheel; it applies to the selected shape,
+  or to the next one.
+- Colour: palette swatches (`C` cycles), `＋` / `P` opens a colour picker; the picked colour is
+  remembered as an extra swatch. Colours apply to the selected shape too.
+- `Ctrl+Z` undoes the last change: drawing, moving, resizing, recolouring, deleting. A burst of
+  width changes counts as one change.
+- `Esc` closes the picker, then deselects, then cancels.
+
+When several screens are stitched they keep their layout, but empty bands between them (e.g. an
+unpicked screen in the middle) are removed. Screens with different scales are rendered at the
+highest density.
+
+## Latency
+
+The time from trigger to on-screen overlay is what this tool optimises for.
+
+- Every screen is copied (wlr-screencopy) the moment the overlay is requested. The daemon does
+  it on the thread that receives the request, before anything else, over a connection it keeps
+  open with already-used shared-memory buffers: fresh buffers cost the compositor ~10 ms just to
+  fault their pages in. Standalone, the copy overlaps gpui start-up.
+- Pixels stay in BGRA, the order the compositor hands out and gpui displays: the common
+  `XRGB8888` format is copied (in parallel bands) with only the alpha set, the result goes to the
+  GPU as is, and saving cuts from that same memory. Only the final cut is converted to RGBA.
+- Drawing code does nothing until used; the colour palette is parsed when the toolbar first
+  shows, the colour picker is only built while it is open, and system fonts are loaded on a
+  background thread the first time the Text tool is picked. Text is laid out and rasterised
+  with cosmic-text (gpui's own Linux text stack), the same way for the preview and the file.
+- gpui's first window in a process costs ~200 ms (GPU device and pipeline setup); later ones
+  ~15 ms. **Run the daemon** and every `screencapture` / `screencapture screen` call hands its
+  request over a Unix socket instead of starting gpui, with a fallback to standalone if there is no daemon.
+- No-UI commands (`all`, `screen NAMES`, `region -g`) never start gpui.
+- The daemon's socket lives in `$XDG_RUNTIME_DIR` (or a `0700` folder in `/tmp`). Both the daemon
+  and its clients refuse a socket folder that isn't yours or is open to others.
+
+Measured on Hyprland, 3× 2560×1440 (`SCREENCAPTURE_TRACE=1` prints these milestones):
+
+| Path | Trigger → overlay on screen |
+|---|---|
+| standalone `screencapture` | ~250 ms |
+| via `screencapture daemon` | ~37 ms |
+
+Daemon breakdown: the screens are frozen ~10 ms after the request (≈6 ms for the compositor to
+copy three screens, ≈5 ms to convert them), then ~15 ms to open the first window and ~11 ms to
+upload its 2560×1440 image and show it. Other screens follow one by one. The drawing toolbar
+row is added one frame later: building it in the first frame cost a whole extra frame (~16 ms).
+
+The daemon keeps its screencopy buffers between captures: about 15 MB per 2560×1440 screen
+(44 MB for three), shared with the compositor rather than duplicated. After 5 minutes without
+a capture it gives them back; the next capture then takes ~15 ms longer (52 ms instead of 37 ms
+to the overlay). `SCREENCAPTURE_RELEASE_AFTER_SECS` changes the delay. Its request thread sleeps
+in `poll()` and its Wayland connection is idle between captures.
+
+| No-UI capture, whole process incl. PNG encode | |
+|---|---|
+| `all` (7680×1440) | ~110 ms (mostly PNG encoding) |
+| `region -g` (400×200) | ~13 ms |
+
+### Hyprland setup
+
+```ini
+exec-once = screencapture daemon
+bind = , Print, exec, screencapture
+bind = SHIFT, Print, exec, screencapture screen
+bind = CTRL, Print, exec, screencapture all
+# Optional: skip the layer fade-in so the overlay is instant visually too.
+layerrule = noanim, screencapture
+```
+
+## Backends and features
+
+| Feature | Default | Enables |
+|---|---|---|
+| `wayland` | yes | gpui Wayland backend (layer-shell overlay) + native `wlr-screencopy` capture |
+| `x11` | no | gpui X11 backend + [`xcap`](https://crates.io/crates/xcap) capture |
+
+Code for a disabled feature is not compiled (`cargo tree` of the default build has no X11 crates).
+With both enabled, `SCREENCAPTURE_BACKEND=xcap` forces xcap. Windows and macOS always use xcap.
+
+Native screencopy exists because xcap 0.9's wlroots path fails on Hyprland (`wl_shm` invalid
+pool size). It works on wlroots-style compositors (Hyprland, Sway, river…). GNOME and KDE Wayland
+don't offer screencopy; they need the `x11` feature (xcap goes through their portals).
+
+## Development
+
+Nightly toolchain (`rust-toolchain.toml`) with Polonius (`-Zpolonius=next`), applied to this crate
+only through `profile-rustflags`. Developed test-first.
+
+```sh
+cargo test                      # unit tests
+cargo test -- --include-ignored # + live tests against the running compositor; the e2e tests
+                                #   briefly show the overlay, check it is not in the shot and
+                                #   that a drawing is saved
+cargo clippy --all-targets      # pedantic + nursery; also try --no-default-features --features x11
+```

@@ -1,0 +1,324 @@
+//! Writing screenshots: timestamped names that never overwrite, and the remembered folder.
+
+use std::path::{Path, PathBuf};
+
+use crate::annotate::{Color, PASTELS, parse_color};
+use anyhow::Result;
+use chrono::{DateTime, Local};
+use image::RgbaImage;
+use serde::{Deserialize, Serialize};
+
+/// `screenshot_2026-11-06_14-35-38.123.png`: sorts chronologically, safe on every filesystem.
+pub fn file_name(time: DateTime<Local>) -> String {
+    format!("screenshot_{}.png", stamp(time))
+}
+
+fn stamp(time: DateTime<Local>) -> String {
+    time.format("%Y-%m-%d_%H-%M-%S%.3f").to_string()
+}
+
+/// Encode `image` as PNG into `out`, and report errors up to the last byte (buffered writes
+/// included).
+pub fn write_png(image: &RgbaImage, out: impl std::io::Write) -> Result<()> {
+    use image::{
+        ImageEncoder,
+        codecs::png::{CompressionType, FilterType, PngEncoder},
+    };
+    let mut writer = std::io::BufWriter::new(out);
+    // Fast compression: a few percent bigger files, several times quicker to write.
+    PngEncoder::new_with_quality(&mut writer, CompressionType::Fast, FilterType::Adaptive).write_image(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        image::ExtendedColorType::Rgba8,
+    )?;
+    // Dropping a BufWriter would swallow this last write's error.
+    writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+    Ok(())
+}
+
+/// A written screenshot: where, and the PNG bytes themselves (for the clipboard).
+pub struct Saved {
+    pub path: PathBuf,
+    pub png: Vec<u8>,
+}
+
+/// Encode `image` as PNG into `dir` (created if missing) under a timestamped name. If that name
+/// is taken, `_1`, `_2`, ... is appended; existing files are never overwritten.
+pub fn save_png(image: &RgbaImage, dir: &Path, time: DateTime<Local>) -> Result<Saved> {
+    use std::{
+        fs::OpenOptions,
+        io::{ErrorKind, Write},
+    };
+
+    use anyhow::Context;
+
+    // Encoded once, in memory: the same bytes go to the file and the clipboard.
+    let mut png = Vec::with_capacity(image.as_raw().len() / 4);
+    write_png(image, &mut png)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let base = format!("screenshot_{}", stamp(time));
+    let (path, file) = (0_u32..)
+        .map(|n| {
+            if n == 0 {
+                dir.join(file_name(time))
+            } else {
+                dir.join(format!("{base}_{n}.png"))
+            }
+        })
+        .find_map(
+            |path| match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => Some(Ok((path, file))),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e).with_context(|| format!("creating {}", path.display()))),
+            },
+        )
+        .expect("unbounded name search")?;
+
+    let mut file = file;
+    if let Err(e) = file.write_all(&png) {
+        // Never leave a truncated screenshot behind.
+        let _ = std::fs::remove_file(&path);
+        return Err(anyhow::Error::from(e).context(format!("writing {}", path.display())));
+    }
+    Ok(Saved { path, png })
+}
+
+/// Settings remembered between runs.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Config {
+    pub output_dir: Option<PathBuf>,
+    /// Drawing colours as `#RRGGBB` / `#RRGGBBAA`; the built-in pastels when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<Vec<String>>,
+    /// Last colour chosen in the picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_color: Option<String>,
+}
+
+impl Config {
+    /// The drawing palette: the configured colours that parse, else the built-in pastels.
+    pub fn colors(&self) -> Vec<Color> {
+        let parsed: Vec<Color> = self
+            .palette
+            .iter()
+            .flatten()
+            .filter_map(|c| parse_color(c))
+            .collect();
+        if parsed.is_empty() {
+            PASTELS.to_vec()
+        } else {
+            parsed
+        }
+    }
+
+    pub fn custom_color(&self) -> Option<Color> {
+        self.custom_color.as_deref().and_then(parse_color)
+    }
+
+    pub fn path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("screencapture").join("config.json"))
+    }
+
+    /// Missing or unreadable config falls back to defaults: a broken file must not block a capture.
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(self)?)?;
+        Ok(())
+    }
+
+    pub fn load() -> Self {
+        Self::path().map_or_default(|p| Self::load_from(&p))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        Self::path().map_or(Ok(()), |p| self.save_to(&p))
+    }
+
+    /// Where to save: explicit choice, else last used folder, else `~/Pictures/Screenshots`.
+    pub fn output_dir(&self, explicit: Option<&Path>) -> PathBuf {
+        explicit
+            .map(Path::to_path_buf)
+            .or_else(|| self.output_dir.clone())
+            .unwrap_or_else(default_output_dir)
+    }
+}
+
+pub fn default_output_dir() -> PathBuf {
+    dirs::picture_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Screenshots")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn time() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 11, 6, 14, 5, 9).unwrap() + chrono::Duration::milliseconds(42)
+    }
+
+    fn image() -> RgbaImage {
+        RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+    }
+
+    #[test]
+    fn name_is_timestamped_with_milliseconds() {
+        assert_eq!(file_name(time()), "screenshot_2026-11-06_14-05-09.042.png");
+    }
+
+    #[test]
+    fn saves_decodable_png_under_timestamp_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_png(&image(), dir.path(), time()).unwrap().path;
+        assert_eq!(path, dir.path().join("screenshot_2026-11-06_14-05-09.042.png"));
+        assert_eq!(image::open(&path).unwrap().to_rgba8(), image());
+    }
+
+    #[test]
+    fn saving_returns_the_encoded_png_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = save_png(&image(), dir.path(), time()).unwrap();
+        assert_eq!(std::fs::read(&saved.path).unwrap(), saved.png);
+        assert_eq!(image::load_from_memory(&saved.png).unwrap().to_rgba8(), image());
+    }
+
+    #[test]
+    fn never_overwrites_on_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = save_png(&image(), dir.path(), time()).unwrap().path;
+        let second = save_png(&image(), dir.path(), time()).unwrap().path;
+        let third = save_png(&image(), dir.path(), time()).unwrap().path;
+        assert_eq!(
+            second.file_name().unwrap(),
+            "screenshot_2026-11-06_14-05-09.042_1.png"
+        );
+        assert_eq!(
+            third.file_name().unwrap(),
+            "screenshot_2026-11-06_14-05-09.042_2.png"
+        );
+        assert!(first.exists());
+    }
+
+    #[test]
+    fn creates_missing_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b");
+        assert!(
+            save_png(&image(), &nested, time())
+                .unwrap()
+                .path
+                .starts_with(&nested)
+        );
+    }
+
+    #[test]
+    fn config_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/config.json");
+        let config = Config {
+            output_dir: Some("/tmp/shots".into()),
+            palette: Some(vec!["#123456".into()]),
+            custom_color: Some("#abcdef".into()),
+        };
+        config.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), config);
+    }
+
+    #[test]
+    fn missing_or_corrupt_config_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(Config::load_from(&path), Config::default());
+        std::fs::write(&path, "{not json").unwrap();
+        assert_eq!(Config::load_from(&path), Config::default());
+    }
+
+    #[test]
+    fn output_dir_precedence() {
+        let remembered = Config {
+            output_dir: Some("/remembered".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            remembered.output_dir(Some(Path::new("/explicit"))),
+            Path::new("/explicit")
+        );
+        assert_eq!(remembered.output_dir(None), Path::new("/remembered"));
+        assert_eq!(Config::default().output_dir(None), default_output_dir());
+    }
+
+    #[test]
+    fn palette_comes_from_config_with_pastel_fallback() {
+        assert_eq!(Config::default().colors(), PASTELS.to_vec());
+        let custom = Config {
+            palette: Some(vec!["#112233".into(), "nonsense".into(), "44556680".into()]),
+            ..Config::default()
+        };
+        assert_eq!(
+            custom.colors(),
+            vec![[0x11, 0x22, 0x33, 0xFF], [0x44, 0x55, 0x66, 0x80]]
+        );
+        let broken = Config {
+            palette: Some(vec!["nope".into()]),
+            ..Config::default()
+        };
+        assert_eq!(broken.colors(), PASTELS.to_vec());
+    }
+
+    #[test]
+    fn palette_and_custom_colour_load_from_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r##"{"output_dir":null,"palette":["#ff0000"],"custom_color":"#00ff00"}"##,
+        )
+        .unwrap();
+        let config = Config::load_from(&path);
+        assert_eq!(config.colors(), vec![[255, 0, 0, 255]]);
+        assert_eq!(config.custom_color(), Some([0, 255, 0, 255]));
+        // Older files without the new keys still load.
+        std::fs::write(&path, r#"{"output_dir":"/x"}"#).unwrap();
+        assert_eq!(Config::load_from(&path).output_dir, Some("/x".into()));
+    }
+
+    /// Takes nothing: like a full disk.
+    struct Full;
+    impl std::io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_errors_are_reported_even_when_buffered() {
+        let image = RgbaImage::new(4, 4);
+        assert!(write_png(&image, Full).is_err());
+        let mut ok = Vec::new();
+        write_png(&image, &mut ok).unwrap();
+        assert!(image::load_from_memory(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        // PNG has no zero-sized images: the encoder refuses.
+        assert!(save_png(&RgbaImage::new(0, 0), dir.path(), Local::now()).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
