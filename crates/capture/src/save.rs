@@ -7,7 +7,7 @@ use chrono::{DateTime, Local};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Section;
+use screencapture_core::config::Section;
 
 /// Encode `image` as PNG into `out`, and report errors up to the last byte (buffered writes
 /// included).
@@ -43,7 +43,7 @@ pub fn save_png(image: &RgbaImage, dir: &Path, time: DateTime<Local>) -> Result<
     // Encoded once, in memory: the same bytes go to the file and the clipboard.
     let mut png = Vec::with_capacity(image.as_raw().len() / 4);
     write_png(image, &mut png)?;
-    let (path, file) = crate::naming::reserve(dir, "screenshot", "png", time)?;
+    let (path, file) = screencapture_core::naming::reserve(dir, "screenshot", "png", time)?;
 
     let mut file = file;
     if let Err(e) = file.write_all(&png) {
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn the_folder_reads_from_the_config_file_s_key() {
-        let mut config = crate::config::Config::default();
+        let mut config = screencapture_core::config::Config::default();
         config.set_section(&remembered());
         assert_eq!(config.section::<Screenshots>(), remembered());
     }

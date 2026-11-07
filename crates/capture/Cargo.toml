@@ -1,0 +1,22 @@
+[package]
+name = "screencapture-capture"
+description = "Screenshots: the selection cut from the screens, saved as PNG"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+screencapture-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+gpui.workspace = true
+image.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

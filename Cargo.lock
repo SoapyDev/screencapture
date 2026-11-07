@@ -4820,6 +4820,7 @@ dependencies = [
  "libc",
  "lyon",
  "rustix 1.1.6",
+ "screencapture-capture",
  "screencapture-core",
  "screencapture-editing",
  "serde",
@@ -4829,6 +4830,20 @@ dependencies = [
  "tempfile",
  "wayland-client",
  "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "screencapture-capture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "gpui",
+ "image",
+ "screencapture-core",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

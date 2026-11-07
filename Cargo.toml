@@ -14,6 +14,7 @@ repository = "https://github.com/SoapyDev/screencapture"
 [workspace.dependencies]
 screencapture-core = { path = "crates/core", default-features = false }
 screencapture-editing = { path = "crates/editing" }
+screencapture-capture = { path = "crates/capture" }
 # GPUI has no recent crates.io release; track Zed's main branch, pinned to a known-good commit
 # (same as gpui-calculator). To update, change `rev` to a newer commit from main.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b" }
@@ -74,6 +75,7 @@ repository.workspace = true
 [dependencies]
 screencapture-core.workspace = true
 screencapture-editing.workspace = true
+screencapture-capture.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true
@@ -132,6 +134,12 @@ rustflags = ["-Zpolonius=next"]
 rustflags = ["-Zpolonius=next"]
 
 [profile.release.package.screencapture-editing]
+rustflags = ["-Zpolonius=next"]
+
+[profile.dev.package.screencapture-capture]
+rustflags = ["-Zpolonius=next"]
+
+[profile.release.package.screencapture-capture]
 rustflags = ["-Zpolonius=next"]
 
 [profile.dev.package."*"]

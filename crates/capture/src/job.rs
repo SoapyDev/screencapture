@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use image::RgbaImage;
 
-use crate::{capture::Snapshot, drawings::Drawings, selection::Request};
+use screencapture_core::{capture::Snapshot, drawings::Drawings, selection::Request};
 
 /// Capture what `request` asks for. Only the monitors involved are copied.
 pub fn grab(request: &Request) -> Result<RgbaImage> {
@@ -21,7 +21,7 @@ pub fn compose<C: std::ops::Deref<Target = [u8]>>(
 ) -> Result<RgbaImage> {
     let mut image = snapshot.grab(request)?;
     // Screens are BGRA; the PNG (and the drawing colours) are RGBA.
-    crate::capture::swap_red_blue(&mut image);
+    screencapture_core::capture::swap_red_blue(&mut image);
     let Some(drawings) = drawings else {
         return Ok(image);
     };
@@ -50,8 +50,8 @@ pub fn run(request: &Request, dir: &Path) -> Result<crate::save::Saved> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::{self, Rect, Shot};
     use image::Rgba;
+    use screencapture_core::capture::{self, Rect, Shot};
 
     /// One white monitor at (0,0) 100x50 logical, 2 px per logical px.
     fn hidpi_white() -> Snapshot {
@@ -170,7 +170,7 @@ mod tests {
         let snap = hidpi_white();
         let request = Request::Region(Rect::new(10, 10, 20, 20));
         let mut cut = snap.grab(&request).unwrap();
-        crate::capture::swap_red_blue(&mut cut);
+        screencapture_core::capture::swap_red_blue(&mut cut);
         assert_eq!(compose(&snap, &request, None).unwrap(), cut);
     }
 
