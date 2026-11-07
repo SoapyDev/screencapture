@@ -27,7 +27,11 @@ mod launch;
 pub mod layout;
 mod recording;
 #[cfg(target_os = "linux")]
+pub mod recording_service;
+#[cfg(target_os = "linux")]
 mod recordings;
+#[cfg(unix)]
+pub mod service;
 mod tools;
 
 use std::{
@@ -199,34 +203,6 @@ pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>) 
     SAVED.load(Ordering::Relaxed)
 }
 
-/// Run the recording `command` that `client` sent. The frame changes at once; the answer may
-/// wait for the file to be finished (joining screens is slow), on its own thread, so other
-/// requests don't.
-#[cfg(target_os = "linux")]
-fn record_for(
-    client: daemon::Client,
-    command: crate::record::command::Command,
-    recorder: &mut crate::record::Recorder,
-    send_frame: &impl Fn(&crate::record::Recorder),
-) {
-    // Never record the frozen overlay.
-    if command.starts() && recorder.recording().is_none() && GATE.is_open() {
-        client.reply(&daemon::Reply::Busy);
-        return;
-    }
-    let before = recorder.recording().map(std::path::Path::to_path_buf);
-    let outcome = recorder.run(command, &mut crate::record::LiveEnv);
-    // A different recording (or none) now: its frame replaces the old one.
-    if recorder.recording() != before.as_deref() {
-        send_frame(recorder);
-    }
-    if !matches!(outcome, crate::record::Outcome::Finishing(_)) {
-        outcome.answer(client);
-        return;
-    }
-    std::thread::spawn(move || outcome.answer(client));
-}
-
 /// Saves are made at once (~20 µs), so they land in the order the user made them; one that
 /// failed is reported, naming `what` changed.
 fn report_unremembered(saved: anyhow::Result<()>, what: &str) {
@@ -253,136 +229,118 @@ fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) 
 #[cfg(unix)]
 enum ToUi {
     Overlay(daemon::Client, Mode, anyhow::Result<Frozen>),
-    /// Show the frame for this recorded area on these screens, replacing any other; `None`
-    /// removes it.
-    #[cfg(target_os = "linux")]
-    Frame(Option<crate::record::OnScreen>),
+    /// Something of a service's (the recording frame).
+    Run(service::UiJob),
 }
 
-/// How often the daemon checks on a running recorder (it may quit by itself).
-#[cfg(target_os = "linux")]
-const WATCH_RECORDER: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// Resident mode: initialise the GPU once, then open an overlay per client request.
+/// Resident mode: initialise the GPU once, then open an overlay per client request, and let
+/// `service` answer requests of its own.
 #[cfg(unix)]
-pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
-    use futures::StreamExt;
-
+pub fn run_daemon(listener: std::os::unix::net::UnixListener, service: impl service::Service) {
     gpui_platform::application().run(move |cx: &mut App| {
         cx.set_quit_mode(QuitMode::Explicit);
         warm_up(cx);
         // This process outlives every capture: it can keep the copied image on offer itself.
         crate::clipboard::serve();
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        // Requests are served on this thread, and the screens frozen right here, the moment a
-        // request arrives: the UI thread is only woken once there is something to show.
-        std::thread::spawn(move || {
-            // Used by both closures below, never at once.
-            let session = std::cell::RefCell::new(crate::capture::Session::default());
-            // Connect and fault in the screencopy buffers now, not on the first request.
-            if let Err(e) = session.borrow_mut().take() {
-                eprintln!("screencapture: warm-up capture failed ({e:#})");
-            }
-            trace("capture warmed up");
-            let quiet = || {
-                session.borrow_mut().release_buffers();
-                crate::memory::release();
-                trace("idle: screen buffers released");
-            };
-            // `SCREENCAPTURE_RELEASE_AFTER_SECS` overrides the delay.
-            let release_after = std::env::var("SCREENCAPTURE_RELEASE_AFTER_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map_or(RELEASE_BUFFERS_AFTER, std::time::Duration::from_secs);
-            // Recordings run beside the overlay's machinery, on this thread.
-            #[cfg(target_os = "linux")]
-            let recorder = std::cell::RefCell::new(crate::record::Recorder::default());
-            #[cfg(target_os = "linux")]
-            let send_frame = |recorder: &crate::record::Recorder| {
-                // Owned only here, to cross to the UI thread.
-                let _ = tx.unbounded_send(ToUi::Frame(recorder.frame().cloned()));
-            };
-            // While recording: notice a recorder that quit by itself, and take its frame down.
-            #[cfg(target_os = "linux")]
-            let watch = || {
-                let mut recorder = recorder.borrow_mut();
-                recorder.recording()?;
-                if let Some(outcome) = recorder.ended_by_itself() {
-                    send_frame(&recorder);
-                    std::thread::spawn(move || {
-                        let outcome = outcome.finished();
-                        eprintln!("screencapture: the recorder stopped by itself: {outcome:?}");
-                    });
-                    return None;
-                }
-                Some(WATCH_RECORDER)
-            };
-            #[cfg(not(target_os = "linux"))]
-            let watch = || None;
-            daemon::serve(
-                &listener,
-                Some(release_after),
-                quiet,
-                watch,
-                |pending: crate::record::Pending| {
-                    crate::trace_restart();
-                    trace("request received");
-                    let daemon::Pending { request, client } = pending;
-                    let mode = match request {
-                        daemon::Request::Overlay(mode) => mode,
-                        #[cfg(target_os = "linux")]
-                        daemon::Request::Feature(command) => {
-                            record_for(client, command, &mut recorder.borrow_mut(), &send_frame);
-                            return;
-                        }
-                        #[cfg(not(target_os = "linux"))]
-                        daemon::Request::Feature(_) => {
-                            client.reply(&daemon::Reply::Error("recording needs Linux".into()));
-                            return;
-                        }
-                    };
-                    // Print while recording: say so, and leave the screen alone.
-                    #[cfg(target_os = "linux")]
-                    if let Some(path) = recorder.borrow().recording() {
-                        client.reply(&daemon::Reply::Recording(path.to_path_buf()));
-                        return;
-                    }
-                    match GATE.enter(std::time::Instant::now()) {
-                        gate::Entry::Busy => {
-                            client.reply(&daemon::Reply::Busy);
-                            return;
-                        }
-                        // Pressed again just as the last overlay closed: let the screens repaint
-                        // without it first.
-                        gate::Entry::Go { wait } if !wait.is_zero() => {
-                            trace("waiting for the last overlay to clear");
-                            std::thread::sleep(wait);
-                        }
-                        gate::Entry::Go { .. } => {}
-                    }
-                    let frozen = session.borrow_mut().take().map(Frozen::new);
-                    trace("screens frozen");
-                    let _ = tx.unbounded_send(ToUi::Overlay(client, mode, frozen));
-                },
-            );
-        });
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        // Requests are served on their own thread, and the screens frozen right there, the
+        // moment a request arrives: the UI thread is only woken once there is something to show.
+        std::thread::spawn(move || serve_requests(&listener, service, &service::Ui(tx)));
         cx.spawn(async move |cx| {
-            let mut shown: Option<recording::Shown> = None;
+            use futures::StreamExt;
+            let mut rx = rx;
             while let Some(work) = rx.next().await {
-                match work {
-                    ToUi::Overlay(client, mode, frozen) => {
-                        cx.update(|cx| serve_request(client, mode, frozen, cx));
-                    }
-                    #[cfg(target_os = "linux")]
-                    ToUi::Frame(frame) => cx.update(|cx| {
-                        let spec = launch::spec_for(frame, cx);
-                        launch::replace_frame(&mut shown, spec, cx);
-                    }),
-                }
+                cx.update(|cx| do_ui_work(work, cx));
             }
         })
         .detach();
     });
+}
+
+/// The UI thread's side of one piece of work: open an overlay, or run a service's job.
+#[cfg(unix)]
+fn do_ui_work(work: ToUi, cx: &mut App) {
+    match work {
+        ToUi::Overlay(client, mode, frozen) => serve_request(client, mode, frozen, cx),
+        ToUi::Run(job) => job(cx),
+    }
+}
+
+/// The daemon's request thread: keeps the screens' capture warm between requests (and gives
+/// its memory back when quiet), and answers every request.
+#[cfg(unix)]
+fn serve_requests<S: service::Service>(
+    listener: &std::os::unix::net::UnixListener,
+    service: S,
+    ui: &service::Ui,
+) {
+    // Used by the closures below, never at once.
+    let session = std::cell::RefCell::new(crate::capture::Session::default());
+    let service = std::cell::RefCell::new(service);
+    // Connect and fault in the screencopy buffers now, not on the first request.
+    if let Err(e) = session.borrow_mut().take() {
+        eprintln!("screencapture: warm-up capture failed ({e:#})");
+    }
+    trace("capture warmed up");
+    let quiet = || {
+        session.borrow_mut().release_buffers();
+        crate::memory::release();
+        trace("idle: screen buffers released");
+    };
+    let watch = || service.borrow_mut().watch(ui);
+    let answer = |pending| answer_request(pending, &mut *service.borrow_mut(), &session, ui);
+    daemon::serve(listener, Some(release_after()), quiet, watch, answer);
+}
+
+/// How long the screen buffers stay without a request (`SCREENCAPTURE_RELEASE_AFTER_SECS`
+/// overrides it).
+#[cfg(unix)]
+fn release_after() -> std::time::Duration {
+    let configured = std::env::var("SCREENCAPTURE_RELEASE_AFTER_SECS").ok();
+    let seconds = configured.and_then(|v| v.parse().ok());
+    seconds.map_or(RELEASE_BUFFERS_AFTER, std::time::Duration::from_secs)
+}
+
+/// One request: the service's, or an overlay to open over freshly frozen screens.
+#[cfg(unix)]
+fn answer_request<S: service::Service>(
+    pending: daemon::Pending<S::Request>,
+    service: &mut S,
+    session: &std::cell::RefCell<crate::capture::Session>,
+    ui: &service::Ui,
+) {
+    crate::trace_restart();
+    trace("request received");
+    let daemon::Pending { request, client } = pending;
+    let mode = match request {
+        daemon::Request::Overlay(mode) => mode,
+        daemon::Request::Feature(request) => return service.handle(request, client, GATE.is_open(), ui),
+    };
+    if let Some(reply) = service.instead_of_overlay() {
+        return client.reply(&reply);
+    }
+    if !wait_for_the_last_overlay() {
+        return client.reply(&daemon::Reply::Busy);
+    }
+    let frozen = session.borrow_mut().take().map(Frozen::new);
+    trace("screens frozen");
+    let _ = ui.0.unbounded_send(ToUi::Overlay(client, mode, frozen));
+}
+
+/// One overlay at a time: `false` if one is up. Pressed again just as the last one closed, let
+/// the screens repaint without it first.
+#[cfg(unix)]
+fn wait_for_the_last_overlay() -> bool {
+    match GATE.enter(std::time::Instant::now()) {
+        gate::Entry::Busy => false,
+        gate::Entry::Go { wait } => {
+            if !wait.is_zero() {
+                trace("waiting for the last overlay to clear");
+                std::thread::sleep(wait);
+            }
+            true
+        }
+    }
 }
 
 #[cfg(unix)]

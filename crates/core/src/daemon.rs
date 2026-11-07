@@ -42,6 +42,14 @@ pub trait Extension: Sized + Clone + std::fmt::Debug + PartialEq + Eq {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NoExtension(std::convert::Infallible);
 
+impl NoExtension {
+    /// There is none: anything follows from having one.
+    #[must_use]
+    pub const fn absurd<T>(self) -> T {
+        match self.0 {}
+    }
+}
+
 impl Extension for NoExtension {
     const WORD: &'static str = "";
 

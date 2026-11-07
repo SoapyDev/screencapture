@@ -36,6 +36,21 @@ pub fn spec_for(frame: Option<OnScreen>, cx: &mut App) -> Option<Spec> {
     })
 }
 
+/// The daemon's recording frame, while one is on screen (UI thread).
+#[derive(Default)]
+struct ShownFrame(Option<Shown>);
+
+impl Global for ShownFrame {}
+
+/// Show the frame for `frame` (from the daemon's recorder), replacing any other; `None` takes
+/// it down.
+pub fn show_frame(frame: Option<OnScreen>, cx: &mut App) {
+    let spec = spec_for(frame, cx);
+    let mut shown = cx.default_global::<ShownFrame>().0.take();
+    replace_frame(&mut shown, spec, cx);
+    cx.set_global(ShownFrame(shown));
+}
+
 /// Replace the frame on screen with `spec`'s (none: take it down).
 pub fn replace_frame(shown: &mut Option<Shown>, spec: Option<Spec>, cx: &mut App) {
     if let Some(old) = shown.take() {

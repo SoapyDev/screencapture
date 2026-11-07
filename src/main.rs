@@ -34,7 +34,7 @@ fn main() -> ExitCode {
     let result = match plan {
         Plan::List => list(),
         #[cfg(unix)]
-        Plan::Daemon => daemon::bind(&daemon::socket_path()).map(overlay::run_daemon),
+        Plan::Daemon => daemon::bind(&daemon::socket_path()).map(run_daemon),
         #[cfg(not(unix))]
         Plan::Daemon => Err(anyhow::anyhow!("daemon mode needs a Unix system")),
         Plan::Capture(request) => capture(&request, &config::Config::load().section()),
@@ -48,6 +48,15 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The daemon, with what this program serves besides the overlay.
+#[cfg(unix)]
+fn run_daemon(listener: std::os::unix::net::UnixListener) {
+    #[cfg(target_os = "linux")]
+    overlay::run_daemon(listener, overlay::recording_service::Recording::default());
+    #[cfg(not(target_os = "linux"))]
+    overlay::run_daemon(listener, overlay::service::NoService);
 }
 
 /// An explicit `-o` folder becomes the remembered one: for videos when recording.
