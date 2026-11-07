@@ -152,7 +152,7 @@ fn record(command: record::command::Command) -> ExitCode {
     {
         use record::command::Command;
         let socket = daemon::socket_path();
-        let answer = match daemon::send(&socket, &daemon::Request::Record(command.clone())) {
+        let answer = match daemon::send(&socket, &daemon::Request::Feature(command.clone())) {
             Some(answer) => answer,
             None if command == Command::Stop => Ok(daemon::Answer {
                 reply: daemon::Reply::NotRecording,

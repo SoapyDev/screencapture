@@ -9,7 +9,7 @@ use gpui::{App, AppContext, Global};
 use super::recording::{self, Shown, Spec};
 use crate::{
     annotate::Shape,
-    daemon::{self, Pending, Reply, Request},
+    daemon::{self, Reply, Request},
     record::{OnScreen, command::Command, foreground::ShowFrame},
 };
 
@@ -46,12 +46,12 @@ pub fn replace_frame(shown: &mut Option<Shown>, spec: Option<Spec>, cx: &mut App
 
 /// Hand `command` to the daemon once the overlay is off the screens, and pass its answer to
 /// `client` (the Print that opened the overlay).
-pub fn through_daemon(command: Command, drawings: Vec<Shape>, client: Option<Pending>, cx: &mut App) {
+pub fn through_daemon(command: Command, drawings: Vec<Shape>, client: Option<daemon::Client>, cx: &mut App) {
     cx.set_global(FrameDrawings(drawings));
     cx.spawn(async move |cx| {
         // Until the overlay is off the screens.
         cx.background_executor().timer(super::gate::SETTLE).await;
-        let request = Request::Record(command);
+        let request: crate::record::Request = Request::Feature(command);
         let answer = cx
             .background_spawn(async move { daemon::send(&daemon::socket_path(), &request) })
             .await;

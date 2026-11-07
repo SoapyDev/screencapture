@@ -27,24 +27,49 @@ pub enum Reply {
     Error(String),
 }
 
-/// What a client asks for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Request {
-    Overlay(Mode),
-    Record(crate::record::command::Command),
+/// A feature's own requests (`record …`): a line starting with its word.
+pub trait Extension: Sized + Clone + std::fmt::Debug + PartialEq + Eq {
+    /// The first word of its request lines.
+    const WORD: &'static str;
+    /// The rest of the line.
+    fn encode(&self) -> String;
+    fn parse(rest: &str) -> Option<Self>;
 }
 
-impl Request {
+/// No feature requests (a build without them): nothing parses as one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoExtension(std::convert::Infallible);
+
+impl Extension for NoExtension {
+    const WORD: &'static str = "";
+
+    fn encode(&self) -> String {
+        match self.0 {}
+    }
+
+    fn parse(_: &str) -> Option<Self> {
+        None
+    }
+}
+
+/// What a client asks for: the overlay, or something of feature `E`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request<E> {
+    Overlay(Mode),
+    Feature(E),
+}
+
+impl<E: Extension> Request<E> {
     pub fn encode(&self) -> String {
         match self {
             Self::Overlay(mode) => encode_mode(*mode).into(),
-            Self::Record(command) => format!("record {}", command.encode()),
+            Self::Feature(request) => format!("{} {}", E::WORD, request.encode()),
         }
     }
 
     pub fn parse(line: &str) -> Option<Self> {
         match line.trim().split_once(' ') {
-            Some(("record", command)) => crate::record::command::Command::parse(command).map(Self::Record),
+            Some((word, rest)) if word == E::WORD => E::parse(rest).map(Self::Feature),
             _ => parse_mode(line).map(Self::Overlay),
         }
     }
@@ -111,12 +136,13 @@ pub fn socket_path() -> PathBuf {
 
 /// Ask a running daemon to show the overlay. `None` when no daemon listens at `path`.
 pub fn request(path: &Path, mode: Mode) -> Option<Result<Reply>> {
-    send(path, &Request::Overlay(mode)).map(|answer| answer.map(|a| a.reply))
+    let overlay: Request<NoExtension> = Request::Overlay(mode);
+    send(path, &overlay).map(|answer| answer.map(|a| a.reply))
 }
 
 /// Hand `request` to a running daemon and wait for its answer. `None` when no daemon listens
 /// at `path`.
-pub fn send(path: &Path, request: &Request) -> Option<Result<Answer>> {
+pub fn send<E: Extension>(path: &Path, request: &Request<E>) -> Option<Result<Answer>> {
     // Anyone who could write that directory could be impersonating the daemon.
     check_private_dir(path.parent()?).ok()?;
     let mut stream = UnixStream::connect(path).ok()?;
@@ -137,13 +163,18 @@ pub fn send(path: &Path, request: &Request) -> Option<Result<Answer>> {
     })())
 }
 
-/// A request received by the daemon; answer it with [`Pending::reply`].
-pub struct Pending {
-    pub request: Request,
+/// A request received by the daemon, and the client to answer.
+pub struct Pending<E> {
+    pub request: Request<E>,
+    pub client: Client,
+}
+
+/// Who sent a request: answer with any notes, then one reply.
+pub struct Client {
     stream: UnixStream,
 }
 
-impl Pending {
+impl Client {
     /// Something the user should hear about, ahead of the reply.
     pub fn note(&mut self, text: &str) {
         let _ = writeln!(self.stream, "note {}", text.replace('\n', " "));
@@ -201,12 +232,12 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50
 /// Accept requests forever, handing each to `handle` (malformed ones are answered here). After
 /// `idle` without a request, `on_idle` runs, once per quiet spell. `watch` runs before every
 /// wait and says when it wants to run again (`None`: only after the next request).
-pub fn serve(
+pub fn serve<E: Extension>(
     listener: &UnixListener,
     idle: Option<std::time::Duration>,
     mut on_idle: impl FnMut(),
     mut watch: impl FnMut() -> Option<std::time::Duration>,
-    mut handle: impl FnMut(Pending),
+    mut handle: impl FnMut(Pending<E>),
 ) {
     let mut idled = false;
     let mut quiet_since = std::time::Instant::now();
@@ -240,7 +271,7 @@ pub fn serve(
 
 /// Take the next client's request (blocks until one connects); malformed ones are answered
 /// here and give `None`.
-pub fn accept(listener: &UnixListener) -> Option<Pending> {
+pub fn accept<E: Extension>(listener: &UnixListener) -> Option<Pending<E>> {
     let (stream, _) = listener.accept().ok()?;
     let mut line = String::new();
     let reader = stream.try_clone().ok()?;
@@ -248,14 +279,11 @@ pub fn accept(listener: &UnixListener) -> Option<Pending> {
     let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
     BufReader::new(reader).read_line(&mut line).ok()?;
     let _ = stream.set_read_timeout(None);
+    let client = Client { stream };
     if let Some(request) = Request::parse(&line) {
-        return Some(Pending { request, stream });
+        return Some(Pending { request, client });
     }
-    Pending {
-        request: Request::Overlay(Mode::Region),
-        stream,
-    }
-    .reply(&Reply::Error(format!("unknown request {line:?}")));
+    client.reply(&Reply::Error(format!("unknown request {line:?}")));
     None
 }
 
@@ -292,54 +320,83 @@ mod tests {
         assert_eq!(parse_mode("nonsense"), None);
     }
 
+    /// A feature's requests, for these tests: `ping <n>`.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Ping(u8);
+
+    impl Extension for Ping {
+        const WORD: &'static str = "ping";
+
+        fn encode(&self) -> String {
+            self.0.to_string()
+        }
+
+        fn parse(rest: &str) -> Option<Self> {
+            rest.parse().ok().map(Self)
+        }
+    }
+
     #[test]
-    fn requests_round_trip() {
-        use crate::record::{command::Command, plan::Target, settings::Overrides};
+    fn overlay_requests_round_trip() {
         for request in [
-            Request::Overlay(Mode::Region),
+            Request::<Ping>::Overlay(Mode::Region),
             Request::Overlay(Mode::Screens),
-            Request::Record(Command::Stop),
-            Request::Record(Command::Start(Target::All, Overrides::default())),
         ] {
             assert_eq!(Request::parse(&request.encode()), Some(request));
         }
+    }
+
+    #[test]
+    fn feature_requests_round_trip() {
+        let request = Request::Feature(Ping(7));
+        assert_eq!(Request::parse(&request.encode()), Some(request));
+    }
+
+    #[test]
+    fn overlay_requests_are_what_old_clients_send() {
         assert_eq!(
-            encode_mode(Mode::Region),
-            Request::Overlay(Mode::Region).encode(),
-            "old clients"
+            Request::<Ping>::Overlay(Mode::Region).encode(),
+            encode_mode(Mode::Region)
         );
-        assert_eq!(Request::parse("record dance"), None);
-        assert_eq!(Request::parse("dance"), None);
+    }
+
+    #[test]
+    fn a_feature_request_that_makes_no_sense_is_refused() {
+        assert_eq!(Request::<Ping>::parse("ping dance"), None);
+    }
+
+    #[test]
+    fn an_unknown_word_is_refused() {
+        assert_eq!(Request::<Ping>::parse("dance"), None);
+    }
+
+    #[test]
+    fn a_build_without_the_feature_refuses_its_requests() {
+        assert_eq!(Request::<NoExtension>::parse("ping 7"), None);
     }
 
     #[test]
     fn notes_arrive_before_the_reply() {
-        use crate::record::command::Command;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("the system has a temporary folder");
         let path = dir.path().join("run").join("d.sock");
-        let listener = bind(&path).unwrap();
+        let listener = bind(&path).expect("a fresh folder can hold the socket");
         std::thread::spawn(move || {
             serve(
                 &listener,
                 None,
                 || {},
                 || None,
-                |mut pending| {
-                    assert_eq!(pending.request, Request::Record(Command::Stop));
-                    pending.note("first");
-                    pending.note("two\nlines");
-                    pending.reply(&Reply::NotRecording);
+                |pending: Pending<Ping>| {
+                    let mut client = pending.client;
+                    client.note("first");
+                    client.note("two\nlines");
+                    client.reply(&Reply::NotRecording);
                 },
             );
         });
-        let answer = send(&path, &Request::Record(Command::Stop)).unwrap().unwrap();
-        assert_eq!(
-            answer,
-            Answer {
-                reply: Reply::NotRecording,
-                notes: vec!["first".into(), "two lines".into()],
-            }
-        );
+        let answer = send(&path, &Request::Feature(Ping(1))).expect("the daemon listens");
+        let notes = answer.expect("the daemon answers").notes;
+        assert_eq!(notes, vec!["first".to_string(), "two lines".to_string()]);
     }
 
     #[test]
@@ -374,12 +431,12 @@ mod tests {
                 None,
                 || {},
                 || None,
-                |pending| {
+                |pending: Pending<NoExtension>| {
                     let reply = match pending.request {
                         Request::Overlay(Mode::Region) => Reply::Saved("/x.png".into()),
                         _ => Reply::Cancelled,
                     };
-                    pending.reply(&reply);
+                    pending.client.reply(&reply);
                 },
             );
         });
@@ -411,7 +468,7 @@ mod tests {
                 None,
                 || {},
                 || None,
-                |pending| pending.reply(&Reply::Cancelled),
+                |pending: Pending<NoExtension>| pending.client.reply(&Reply::Cancelled),
             );
         });
         let _silent = UnixStream::connect(&path).unwrap();
@@ -442,7 +499,7 @@ mod tests {
                     counter.fetch_add(1, Ordering::Relaxed);
                 },
                 || None,
-                |pending| pending.reply(&Reply::Cancelled),
+                |pending: Pending<NoExtension>| pending.client.reply(&Reply::Cancelled),
             );
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -473,7 +530,7 @@ mod tests {
                     (counter.fetch_add(1, Ordering::Relaxed) < 5)
                         .then_some(std::time::Duration::from_millis(20))
                 },
-                |pending| pending.reply(&Reply::Cancelled),
+                |pending: Pending<NoExtension>| pending.client.reply(&Reply::Cancelled),
             );
         });
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -529,7 +586,7 @@ mod tests {
                 None,
                 || {},
                 || None,
-                |pending| pending.reply(&Reply::Busy),
+                |pending: Pending<NoExtension>| pending.client.reply(&Reply::Busy),
             );
         });
         assert!(request(&path, Mode::Region).is_none(), "falls back to standalone");

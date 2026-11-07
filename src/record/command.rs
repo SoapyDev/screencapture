@@ -13,6 +13,20 @@ pub enum Command {
     Toggle(Target, Overrides),
 }
 
+/// Recording requests travel to the daemon as `record <words>`.
+#[cfg(unix)]
+impl crate::daemon::Extension for Command {
+    const WORD: &'static str = "record";
+
+    fn encode(&self) -> String {
+        Self::encode(self)
+    }
+
+    fn parse(rest: &str) -> Option<Self> {
+        Self::parse(rest)
+    }
+}
+
 impl Command {
     /// Words after `record`.
     pub fn encode(&self) -> String {

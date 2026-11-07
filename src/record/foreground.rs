@@ -13,7 +13,7 @@ use std::{
 };
 
 use super::{Env, Outcome, Recorder, command::Command};
-use crate::daemon::{self, Reply, Request};
+use crate::daemon::{self, Client, Reply, Request};
 
 /// The recorded areas (one per screen) and the screens, while recording; `None` once it ended.
 pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<&super::OnScreen>);
@@ -65,7 +65,7 @@ fn serve(
     recorder: &mut Recorder,
     env: &mut impl Env,
     stop: &AtomicBool,
-) -> (Outcome, Option<daemon::Pending>) {
+) -> (Outcome, Option<Client>) {
     loop {
         if stop.load(Ordering::Relaxed) {
             return (recorder.run(Command::Stop, env), None);
@@ -76,15 +76,15 @@ fn serve(
         if !daemon::readable_within(listener, Duration::from_millis(100)) {
             continue;
         }
-        let Some(pending) = daemon::accept(listener) else {
+        let Some(daemon::Pending { request, client }) = daemon::accept::<Command>(listener) else {
             continue;
         };
-        let (outcome, ends) = match pending.request.clone() {
-            Request::Record(command @ Command::Start(..)) => (recorder.run(command, env), false),
-            Request::Record(Command::Stop | Command::Toggle(..)) => (recorder.run(Command::Stop, env), true),
-            Request::Record(Command::Discard) => (recorder.run(Command::Discard, env), true),
+        let (outcome, ends) = match request {
+            Request::Feature(command @ Command::Start(..)) => (recorder.run(command, env), false),
+            Request::Feature(Command::Stop | Command::Toggle(..)) => (recorder.run(Command::Stop, env), true),
+            Request::Feature(Command::Discard) => (recorder.run(Command::Discard, env), true),
             Request::Overlay(_) => {
-                pending.reply(&Reply::Recording(
+                client.reply(&Reply::Recording(
                     recorder
                         .recording()
                         .map_or_else(Default::default, Path::to_path_buf),
@@ -93,9 +93,9 @@ fn serve(
             }
         };
         if ends {
-            return (outcome, Some(pending));
+            return (outcome, Some(client));
         }
-        outcome.answer(pending);
+        outcome.answer(client);
     }
 }
 
@@ -134,9 +134,9 @@ mod tests {
                 .unwrap();
             let start = daemon::send(
                 &socket,
-                &Request::Record(Command::Start(Target::All, Overrides::default())),
+                &Request::Feature(Command::Start(Target::All, Overrides::default())),
             );
-            let stop = daemon::send(&socket, &Request::Record(Command::Stop))
+            let stop = daemon::send(&socket, &Request::Feature(Command::Stop))
                 .unwrap()
                 .unwrap();
             (print, start.unwrap().unwrap().reply, stop.reply)
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn the_stop_client_waits_for_the_file_to_be_finished() {
         let (_dir, socket, listener, mut recorder, mut env) = recording();
-        let client = std::thread::spawn(move || daemon::send(&socket, &Request::Record(Command::Stop)));
+        let client = std::thread::spawn(move || daemon::send(&socket, &Request::Feature(Command::Stop)));
         let (_, waiting) = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
         let handed_back = waiting.is_some();
         drop(waiting);
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn a_discard_request_ends_it() {
         let (_dir, socket, listener, mut recorder, mut env) = recording();
-        let client = std::thread::spawn(move || daemon::send(&socket, &Request::Record(Command::Discard)));
+        let client = std::thread::spawn(move || daemon::send(&socket, &Request::Feature(Command::Discard)));
         let (outcome, waiting) = serve(&listener, &mut recorder, &mut env, &AtomicBool::new(false));
         drop(waiting);
         let _ = client.join();

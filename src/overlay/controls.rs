@@ -129,7 +129,7 @@ impl Controls {
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         self.drawer = Drawer::Closed;
         self.close_drawer(cx);
-        cx.background_spawn(async move { daemon::send(&daemon::socket_path(), &Request::Record(command)) })
+        cx.background_spawn(async move { daemon::send(&daemon::socket_path(), &Request::Feature(command)) })
             .detach();
     }
 }

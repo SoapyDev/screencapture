@@ -194,7 +194,7 @@ impl Outcome {
     }
 
     /// Tell `client` (after finishing the file, if needed).
-    pub fn answer(self, mut client: crate::daemon::Pending) {
+    pub fn answer(self, mut client: crate::daemon::Client) {
         let (reply, notes) = self.reply();
         for note in &notes {
             client.note(note);

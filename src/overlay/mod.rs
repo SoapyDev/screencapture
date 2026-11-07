@@ -153,7 +153,7 @@ pub struct Overlay {
     windows: Vec<AnyWindowHandle>,
     /// Daemon client waiting for the outcome.
     #[cfg(unix)]
-    client: Option<daemon::Pending>,
+    client: Option<daemon::Client>,
     /// Keep the process (and its warm GPU context) alive afterwards.
     resident: bool,
     /// Drawing colours, parsed from the config the first time the drawing row shows.
@@ -189,13 +189,12 @@ pub fn run(mode: Mode, frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>, 
     SAVED.load(Ordering::Relaxed)
 }
 
-/// Resident mode: initialise the GPU once, then open an overlay per client request.
 /// Run the recording `command` that `client` sent. The frame changes at once; the answer may
 /// wait for the file to be finished (joining screens is slow), on its own thread, so other
 /// requests don't.
 #[cfg(target_os = "linux")]
 fn record_for(
-    client: daemon::Pending,
+    client: daemon::Client,
     command: crate::record::command::Command,
     recorder: &mut crate::record::Recorder,
     send_frame: &impl Fn(&crate::record::Recorder),
@@ -243,7 +242,7 @@ fn report_standalone_recording(outcome: anyhow::Result<crate::record::Outcome>) 
 /// Work the daemon's request thread hands to the UI thread.
 #[cfg(unix)]
 enum ToUi {
-    Overlay(daemon::Pending, anyhow::Result<Frozen>, Remembered),
+    Overlay(daemon::Client, Mode, anyhow::Result<Frozen>, Remembered),
     /// Show the frame for this recorded area on these screens, replacing any other; `None`
     /// removes it.
     #[cfg(target_os = "linux")]
@@ -254,6 +253,7 @@ enum ToUi {
 #[cfg(target_os = "linux")]
 const WATCH_RECORDER: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Resident mode: initialise the GPU once, then open an overlay per client request.
 #[cfg(unix)]
 pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
     use futures::StreamExt;
@@ -309,51 +309,59 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
             };
             #[cfg(not(target_os = "linux"))]
             let watch = || None;
-            daemon::serve(&listener, Some(release_after), quiet, watch, |pending| {
-                crate::trace_restart();
-                trace("request received");
-                #[cfg(target_os = "linux")]
-                {
-                    let mut recorder = recorder.borrow_mut();
-                    if let daemon::Request::Record(command) = pending.request.clone() {
-                        record_for(pending, command, &mut recorder, &send_frame);
-                        return;
-                    }
+            daemon::serve(
+                &listener,
+                Some(release_after),
+                quiet,
+                watch,
+                |pending: crate::record::Pending| {
+                    crate::trace_restart();
+                    trace("request received");
+                    let daemon::Pending { request, client } = pending;
+                    let mode = match request {
+                        daemon::Request::Overlay(mode) => mode,
+                        #[cfg(target_os = "linux")]
+                        daemon::Request::Feature(command) => {
+                            record_for(client, command, &mut recorder.borrow_mut(), &send_frame);
+                            return;
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        daemon::Request::Feature(_) => {
+                            client.reply(&daemon::Reply::Error("recording needs Linux".into()));
+                            return;
+                        }
+                    };
                     // Print while recording: say so, and leave the screen alone.
-                    if let Some(path) = recorder.recording() {
-                        pending.reply(&daemon::Reply::Recording(path.to_path_buf()));
+                    #[cfg(target_os = "linux")]
+                    if let Some(path) = recorder.borrow().recording() {
+                        client.reply(&daemon::Reply::Recording(path.to_path_buf()));
                         return;
                     }
-                }
-                #[cfg(not(target_os = "linux"))]
-                if matches!(pending.request, daemon::Request::Record(_)) {
-                    pending.reply(&daemon::Reply::Error("recording needs Linux".into()));
-                    return;
-                }
-                match GATE.enter(std::time::Instant::now()) {
-                    gate::Entry::Busy => {
-                        pending.reply(&daemon::Reply::Busy);
-                        return;
+                    match GATE.enter(std::time::Instant::now()) {
+                        gate::Entry::Busy => {
+                            client.reply(&daemon::Reply::Busy);
+                            return;
+                        }
+                        // Pressed again just as the last overlay closed: let the screens repaint
+                        // without it first.
+                        gate::Entry::Go { wait } if !wait.is_zero() => {
+                            trace("waiting for the last overlay to clear");
+                            std::thread::sleep(wait);
+                        }
+                        gate::Entry::Go { .. } => {}
                     }
-                    // Pressed again just as the last overlay closed: let the screens repaint
-                    // without it first.
-                    gate::Entry::Go { wait } if !wait.is_zero() => {
-                        trace("waiting for the last overlay to clear");
-                        std::thread::sleep(wait);
-                    }
-                    gate::Entry::Go { .. } => {}
-                }
-                let frozen = session.borrow_mut().take().map(Frozen::new);
-                trace("screens frozen");
-                let _ = tx.unbounded_send(ToUi::Overlay(pending, frozen, Remembered::load()));
-            });
+                    let frozen = session.borrow_mut().take().map(Frozen::new);
+                    trace("screens frozen");
+                    let _ = tx.unbounded_send(ToUi::Overlay(client, mode, frozen, Remembered::load()));
+                },
+            );
         });
         cx.spawn(async move |cx| {
             let mut shown: Option<recording::Shown> = None;
             while let Some(work) = rx.next().await {
                 match work {
-                    ToUi::Overlay(pending, frozen, config) => {
-                        cx.update(|cx| serve_request(pending, frozen, config, cx));
+                    ToUi::Overlay(client, mode, frozen, config) => {
+                        cx.update(|cx| serve_request(client, mode, frozen, config, cx));
                     }
                     #[cfg(target_os = "linux")]
                     ToUi::Frame(frame) => cx.update(|cx| {
@@ -368,17 +376,18 @@ pub fn run_daemon(listener: std::os::unix::net::UnixListener) {
 }
 
 #[cfg(unix)]
-fn serve_request(pending: daemon::Pending, frozen: anyhow::Result<Frozen>, config: Remembered, cx: &mut App) {
+fn serve_request(
+    client: daemon::Client,
+    mode: Mode,
+    frozen: anyhow::Result<Frozen>,
+    config: Remembered,
+    cx: &mut App,
+) {
     match frozen {
-        Ok(frozen) => {
-            let daemon::Request::Overlay(mode) = pending.request else {
-                unreachable!("only overlay requests reach the UI thread")
-            };
-            start(mode, frozen, config, Some(pending), true, cx);
-        }
+        Ok(frozen) => start(mode, frozen, config, Some(client), true, cx),
         Err(e) => {
             GATE.abort();
-            pending.reply(&daemon::Reply::Error(format!("{e:#}")));
+            client.reply(&daemon::Reply::Error(format!("{e:#}")));
         }
     }
 }
@@ -426,7 +435,7 @@ fn start(
     mode: Mode,
     frozen: Frozen,
     config: Remembered,
-    #[cfg(unix)] client: Option<daemon::Pending>,
+    #[cfg(unix)] client: Option<daemon::Client>,
     #[cfg(not(unix))] _client: Option<()>,
     resident: bool,
     cx: &mut App,
