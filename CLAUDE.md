@@ -76,5 +76,24 @@ recording work).
     *Spirit:* a failing test's name says what broke; no digging through a list of asserts to find
     which unrelated expectation went wrong.
 
+18. **No `unwrap`.** Where a panic is truly the right outcome, use `expect` with a message saying
+    why it can't happen (or why stopping is correct). Otherwise handle the case: `?`, `let …
+    else`, `unwrap_or…`, `map_or…`. Enforced by clippy's `unwrap_used` outside tests; tests
+    move to `expect` when they are touched.
+    *Spirit:* every possible panic is a decision someone made on purpose and wrote down, never an
+    accident left in by habit.
+
+19. **End-to-end tests cover every feature.** Branch-based: each user-facing feature and each
+    way of reaching it (command line, daemon, overlay, standalone…) is exercised at least once
+    against the real binary.
+    *Spirit:* unit tests prove the parts; the e2e suite proves the product a user actually runs,
+    so no feature can silently break between the parts.
+
+20. **Avoid cloning; borrow.** Pass references where ownership isn't needed, and take
+    `Option<&T>` rather than `&Option<T>`. Clone only to cross a thread or outlive the owner,
+    and then at the last moment.
+    *Spirit:* copies cost time and memory (rule 6) and blur who owns what; borrowing keeps both
+    cheap and clear.
+
 Toolchain: nightly with Polonius (`rust-toolchain.toml`, `-Zpolonius=next` via
 `profile-rustflags`).

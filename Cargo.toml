@@ -65,6 +65,8 @@ wayland = [
 x11 = ["gpui_platform/x11", "dep:xcap"]
 
 [lints.clippy]
+# CLAUDE.md rule 18: no unwrap outside tests (tests move to `expect` when touched).
+unwrap_used = "warn"
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cast_possible_truncation = "allow"

@@ -56,7 +56,9 @@ fn main() {
     let qh = queue.handle();
     conn.display().get_registry(&qh, ());
     let mut state = State::default();
-    queue.roundtrip(&mut state).unwrap();
+    queue
+        .roundtrip(&mut state)
+        .expect("the compositor answers the registry");
     let manager = state
         .manager
         .as_ref()
@@ -67,7 +69,7 @@ fn main() {
         time += 16;
         f(time);
         pointer.frame();
-        conn.flush().unwrap();
+        conn.flush().expect("the compositor connection stays open");
         std::thread::sleep(Duration::from_millis(16));
     };
     step(&|t| pointer.motion_absolute(t, x1, y1, w, h));
@@ -80,5 +82,7 @@ fn main() {
     }
     step(&|t| pointer.button(t, BTN_LEFT, wl_pointer::ButtonState::Released));
     pointer.destroy();
-    queue.roundtrip(&mut state).unwrap();
+    queue
+        .roundtrip(&mut state)
+        .expect("the compositor takes the last events");
 }
