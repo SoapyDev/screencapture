@@ -73,6 +73,18 @@ pub struct Selection {
     pointer: Option<(i32, i32)>,
 }
 
+impl Request {
+    /// Whether capturing this needs `monitor`; skipping the others saves copy time.
+    pub fn needs(&self, monitor: &MonitorInfo) -> bool {
+        match self {
+            Self::Region(rect) => rect.intersect(monitor.rect).is_some(),
+            Self::Screens(names) => {
+                names.is_empty() || names.iter().any(|n| n.eq_ignore_ascii_case(&monitor.name))
+            }
+        }
+    }
+}
+
 impl Selection {
     pub fn new(mode: Mode, mut monitors: Vec<MonitorInfo>) -> Self {
         monitors.sort_by_key(|m| (m.rect.x, m.rect.y));
@@ -594,5 +606,30 @@ mod tests {
         // Partly over the gap is fine: still on a monitor.
         drag(&mut s, (170, 31), (170, 45));
         assert_eq!(s.region(), Some(Rect::new(150, 13, 20, 32)));
+    }
+
+    fn mon(name: &str, x: i32) -> MonitorInfo {
+        MonitorInfo {
+            name: name.into(),
+            rect: Rect::new(x, 0, 100, 50),
+            output_position: (x, 0),
+            refresh_mhz: None,
+        }
+    }
+
+    #[test]
+    fn region_needs_only_touched_monitors() {
+        let req = Request::Region(Rect::new(90, 0, 20, 20));
+        assert!(req.needs(&mon("A", 0)));
+        assert!(req.needs(&mon("B", 100)));
+        assert!(!req.needs(&mon("C", 200)));
+    }
+
+    #[test]
+    fn screens_need_named_or_all_when_empty() {
+        let req = Request::Screens(vec!["B".into()]);
+        assert!(!req.needs(&mon("A", 0)));
+        assert!(req.needs(&mon("b", 100)));
+        assert!((Request::Screens(vec![])).needs(&mon("A", 0)));
     }
 }

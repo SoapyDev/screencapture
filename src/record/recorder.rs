@@ -82,7 +82,7 @@ impl Active {
     ) -> Result<Self> {
         let ext = if job.gif { "gif" } else { "mp4" };
         // Reserved now, so no other file can take the name; the recorder writes over it.
-        let (path, _) = crate::save::reserve(dir, "screencast", ext, time)?;
+        let (path, _) = crate::naming::reserve(dir, "screencast", ext, time)?;
         let video = if job.gif {
             path.with_extension("part.mp4")
         } else {
@@ -350,7 +350,7 @@ pub const FAKE_RECORDER: &str = r#"out="$1"; trap 'echo end >> "$out"; exit 0' I
 /// Run `script` (see [`FAKE_RECORDER`]) as the recorder of `job`, in `dir`.
 #[cfg(test)]
 pub fn spawn_fake(dir: &Path, script: &str, job: Job) -> Result<Active> {
-    let (path, _) = crate::save::reserve(dir, "screencast", "mp4", chrono::Local::now())?;
+    let (path, _) = crate::naming::reserve(dir, "screencast", "mp4", chrono::Local::now())?;
     let stamp = PathBuf::from(format!("{}.ts", path.display()));
     let files = Files {
         path: path.clone(),

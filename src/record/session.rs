@@ -38,7 +38,7 @@ impl Session {
             return Ok(Self::single(active));
         };
         let ext = if join.gif { "gif" } else { "mp4" };
-        let (path, _) = crate::save::reserve(dir, "screencast", ext, time)?;
+        let (path, _) = crate::naming::reserve(dir, "screencast", ext, time)?;
         let started = start_parts(backend, plan, &path);
         if started.is_err() {
             let _ = std::fs::remove_file(&path);

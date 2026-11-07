@@ -5,11 +5,11 @@ use std::path::Path;
 use anyhow::Result;
 use image::RgbaImage;
 
-use crate::{capture::Snapshot, drawings::Drawings, overlay::layout::needs, selection::Request};
+use crate::{capture::Snapshot, drawings::Drawings, selection::Request};
 
 /// Capture what `request` asks for. Only the monitors involved are copied.
 pub fn grab(request: &Request) -> Result<RgbaImage> {
-    compose(&Snapshot::take_where(|m| needs(request, m))?, request, None)
+    compose(&Snapshot::take_where(|m| request.needs(m))?, request, None)
 }
 
 /// The final image for an overlay selection: cut from the frozen `snapshot`, with any

@@ -1,9 +1,6 @@
 //! Pure geometry behind the overlay windows.
 
-use crate::{
-    capture::{MonitorInfo, Rect},
-    selection::Request,
-};
+use crate::capture::{MonitorInfo, Rect};
 
 /// Areas of a monitor to darken so the selection (global coords) stays clear.
 /// Returned rects are local to the monitor.
@@ -37,16 +34,6 @@ pub fn match_display(origin: (i32, i32), monitors: &[MonitorInfo]) -> Option<usi
         .position(exact)
         .or_else(|| monitors.iter().position(|m| (m.rect.x, m.rect.y) == origin))
         .or_else(|| (0..monitors.len()).min_by_key(|&i| distance(monitors[i].output_position)))
-}
-
-/// Whether capturing `request` needs this monitor; skipping the others saves copy time.
-pub fn needs(request: &Request, monitor: &MonitorInfo) -> bool {
-    match request {
-        Request::Region(rect) => rect.intersect(monitor.rect).is_some(),
-        Request::Screens(names) => {
-            names.is_empty() || names.iter().any(|n| n.eq_ignore_ascii_case(&monitor.name))
-        }
-    }
 }
 
 /// Height of the band the toolbar occupies at the top or bottom of a monitor.
@@ -135,22 +122,6 @@ mod tests {
         let monitors = [mon("A", 0, 0), mon("B", 100, 100)];
         assert_eq!(match_display((98, 0), &monitors), Some(1));
         assert_eq!(match_display((0, 0), &[]), None);
-    }
-
-    #[test]
-    fn region_needs_only_touched_monitors() {
-        let req = Request::Region(Rect::new(90, 0, 20, 20));
-        assert!(needs(&req, &mon("A", 0, 0)));
-        assert!(needs(&req, &mon("B", 100, 0)));
-        assert!(!needs(&req, &mon("C", 200, 0)));
-    }
-
-    #[test]
-    fn screens_need_named_or_all_when_empty() {
-        let req = Request::Screens(vec!["B".into()]);
-        assert!(!needs(&req, &mon("A", 0, 0)));
-        assert!(needs(&req, &mon("b", 100, 0)));
-        assert!(needs(&Request::Screens(vec![]), &mon("A", 0, 0)));
     }
 
     #[test]

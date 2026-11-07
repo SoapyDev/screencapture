@@ -10,42 +10,24 @@ mod drawings;
 mod hyprland;
 mod job;
 mod memory;
+mod naming;
 mod overlay;
 mod record;
 mod save;
 mod selection;
 mod text;
+mod trace;
 
-use std::{
-    process::ExitCode,
-    sync::{Mutex, OnceLock},
-    time::Instant,
-};
+use std::process::ExitCode;
 
 use clap::Parser;
+pub use trace::{trace, trace_restart};
 
 use crate::{
     cli::{Cli, Plan},
     overlay::Remembered,
     selection::Request,
 };
-
-static START: Mutex<Option<Instant>> = Mutex::new(None);
-
-/// With `SCREENCAPTURE_TRACE=1`, print milliseconds since launch (or, in the daemon, since the
-/// request arrived) for each milestone.
-pub fn trace(what: &str) {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    if *ENABLED.get_or_init(|| std::env::var_os("SCREENCAPTURE_TRACE").is_some()) {
-        let start = *START.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let ms = start.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
-        eprintln!("[{ms:7.1} ms] {what}");
-    }
-}
-
-pub fn trace_restart() {
-    *START.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
-}
 
 fn main() -> ExitCode {
     trace_restart();
