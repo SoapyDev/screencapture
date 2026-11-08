@@ -10,6 +10,7 @@
 //! the daemon it is the only work done before the windows open.
 
 pub mod actions;
+pub mod drawer;
 pub mod feature;
 pub mod folder;
 #[cfg(unix)]
