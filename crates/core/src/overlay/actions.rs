@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, AnyElement, Div, SharedString, div, ease_in_out, prelude::*, px, rgba};
+use gpui::{Animation, AnimationExt, AnyElement, Div, SharedString, div, ease_in_out, prelude::*, px};
 
-use super::{feature::Actions, layout::Edge};
+use super::{feature::Actions, layout::Edge, theme};
 
 /// How long the bars take to slide off the screens when a recording starts.
 pub const SLIDE: Duration = Duration::from_millis(150);
@@ -51,9 +51,9 @@ fn notice_line(text: &SharedString) -> Div {
     div()
         .px_2()
         .rounded_sm()
-        .bg(rgba(0x0000_00c0))
+        .bg(theme::current().scrim)
         .text_sm()
-        .text_color(rgba(0xff8a_80ff))
+        .text_color(theme::current().danger_text)
         .child(text.clone())
 }
 

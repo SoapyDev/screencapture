@@ -17,6 +17,7 @@ pub mod gate;
 pub mod layout;
 #[cfg(unix)]
 pub mod service;
+pub mod theme;
 pub mod widgets;
 
 use std::{
@@ -35,7 +36,7 @@ use gpui::{
     FontWeight, Hsla, ImageSource, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, PlatformDisplay, Point, QuitMode, RenderImage,
     ScrollDelta, ScrollEvent, SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions, canvas, div, hsla, img, prelude::*, px, rgba, size,
+    WindowOptions, canvas, div, hsla, img, prelude::*, px, size,
 };
 use smallvec::SmallVec;
 
@@ -1058,6 +1059,7 @@ struct View {
 /// Dark rounded strip the toolbar rows are made of.
 #[must_use]
 pub fn panel() -> Div {
+    let theme = theme::current();
     div()
         .occlude()
         .flex()
@@ -1065,16 +1067,16 @@ pub fn panel() -> Div {
         .gap_1()
         .p_1()
         .rounded_lg()
-        .bg(rgba(0x1e1e_22f0))
+        .bg(theme.surface)
         .border_1()
-        .border_color(hsla(0., 0., 1., 0.12))
+        .border_color(theme.border)
         .text_sm()
-        .text_color(hsla(0., 0., 0.92, 1.))
+        .text_color(theme.on_surface)
 }
 
 #[must_use]
 pub fn separator() -> Div {
-    div().w(px(1.)).h(px(20.)).mx_1().bg(hsla(0., 0., 1., 0.15))
+    div().w(px(1.)).h(px(20.)).mx_1().bg(theme::current().separator)
 }
 
 impl View {
@@ -1147,12 +1149,6 @@ impl View {
     }
 }
 
-pub const ACCENT: Hsla = Hsla {
-    h: 0.58,
-    s: 0.85,
-    l: 0.55,
-    a: 1.,
-};
 const DIM: Hsla = Hsla {
     h: 0.,
     s: 0.,
@@ -1175,9 +1171,9 @@ pub fn rect_div(r: Rect) -> Div {
 #[must_use]
 pub fn handle_div(x: i32, y: i32) -> Div {
     rect_div(Rect::new(x - HANDLE / 2, y - HANDLE / 2, HANDLE, HANDLE))
-        .bg(gpui::white())
+        .bg(theme::current().handle_fill)
         .border_1()
-        .border_color(ACCENT)
+        .border_color(theme::current().accent)
 }
 
 /// Window-local position to global logical desktop coordinates.
@@ -1278,14 +1274,17 @@ fn region_marks(o: &Overlay, monitor: Rect, hovered: bool) -> Vec<AnyElement> {
         let hint = (region.is_none() && hovered).then(|| {
             let outline = rect_div(local(monitor, monitor)).border_2();
             outline
-                .border_color(hsla(0.58, 0.85, 0.55, 0.5))
+                .border_color(theme::current().accent_hint)
                 .into_any_element()
         });
         return hint.into_iter().collect();
     };
     let shown = local(selected, monitor);
     let handles = (!o.busy() && !o.holds_a_tool()).then(|| region_handles(shown));
-    let outline = rect_div(shown).border_1().border_color(ACCENT).into_any_element();
+    let outline = rect_div(shown)
+        .border_1()
+        .border_color(theme::current().accent)
+        .into_any_element();
     let label = size_label(selected, shown, monitor.h).into_any_element();
     std::iter::once(outline)
         .chain(handles.into_iter().flatten())
@@ -1324,18 +1323,19 @@ fn size_label(selected: Rect, shown: Rect, screen_height: i32) -> Div {
         .top(px(top.to_f32()))
         .px_2()
         .rounded_sm()
-        .bg(rgba(0x0000_00c0))
+        .bg(theme::current().scrim)
         .text_xs()
-        .text_color(gpui::white())
+        .text_color(theme::current().on_scrim)
         .child(format!("{} × {}", selected.w, selected.h))
 }
 
 /// A screen in Screens mode: its name, with a border when picked or under the pointer.
 fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
+    let theme = theme::current();
     let border = if picked {
-        ACCENT
+        theme.accent
     } else if hovered {
-        hsla(0., 0., 1., 0.5)
+        theme.screen_hover_outline
     } else {
         hsla(0., 0., 0., 0.)
     };
@@ -1343,10 +1343,10 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
         .px_4()
         .py_2()
         .rounded_lg()
-        .bg(rgba(0x0000_00a0))
+        .bg(theme.scrim_soft)
         .text_2xl()
         .font_weight(FontWeight::BOLD)
-        .text_color(gpui::white())
+        .text_color(theme.on_scrim)
         .child(format!("{}{}", if picked { "✓ " } else { "" }, monitor.name));
     let area = rect_div(local(monitor.rect, monitor.rect))
         .border_4()

@@ -1,8 +1,8 @@
 //! The overlay's look, shared by the features: buttons and colours.
 
-use gpui::{App, CursorStyle, Div, Entity, SharedString, Stateful, Window, div, hsla, prelude::*, rgba};
+use gpui::{App, CursorStyle, Div, Entity, SharedString, Stateful, Window, div, prelude::*, rgba};
 
-use super::{ACCENT, Overlay};
+use super::{Overlay, theme};
 
 /// A colour as gpui takes it.
 #[must_use]
@@ -11,6 +11,7 @@ pub fn color(c: [u8; 4]) -> gpui::Rgba {
 }
 
 pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, active: bool) -> Stateful<Div> {
+    let theme = theme::current();
     div()
         .id(id.into())
         .px_3()
@@ -19,8 +20,8 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, activ
         .cursor(CursorStyle::PointingHand)
         .when_else(
             active,
-            |d| d.bg(ACCENT).text_color(gpui::white()),
-            |d| d.hover(|d| d.bg(hsla(0., 0., 1., 0.12))),
+            |d| d.bg(theme.accent).text_color(theme.on_accent),
+            |d| d.hover(|d| d.bg(theme.hover)),
         )
         .child(label.into())
 }
