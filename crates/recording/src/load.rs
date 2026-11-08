@@ -1,6 +1,10 @@
 //! How busy the machine is, for the Adaptive frame rate: read once, when a recording starts.
 
-use std::time::Duration;
+use std::{
+    io::Read,
+    process::{Child, Command, ExitStatus, Stdio},
+    time::{Duration, Instant},
+};
 
 use screencapture_core::units::ToF32;
 
@@ -59,17 +63,50 @@ fn sysfs_gpu() -> Option<f32> {
         .reduce(f32::max)
 }
 
+/// How long `nvidia-smi` may take: it answers in tens of ms, but a wedged driver can hang it,
+/// and a recording must not wait on that.
+const NVIDIA_SMI_LIMIT: Duration = Duration::from_millis(500);
+
 fn nvidia_gpu() -> Option<f32> {
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
+    let mut command = Command::new("nvidia-smi");
+    command.args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]);
+    parse_nvidia_smi(&output_within(command, NVIDIA_SMI_LIMIT)?)
+}
+
+/// How often a command that hasn't finished yet is checked on.
+const POLL: Duration = Duration::from_millis(5);
+
+/// What `command` printed, if it succeeds within `limit`; one still running then is killed.
+/// Only for commands that print little: the output is read once the command has exited, so
+/// one filling the pipe would block until `limit`.
+fn output_within(mut command: Command, limit: Duration) -> Option<String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    out.status
-        .success()
-        .then(|| parse_nvidia_smi(&String::from_utf8_lossy(&out.stdout)))
-        .flatten()
+    if !exited_within(&mut child, limit)?.success() {
+        return None;
+    }
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    Some(output)
+}
+
+/// How `child` exited, if it does within `limit`; otherwise it is killed.
+fn exited_within(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            _ => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
 }
 
 /// The busier of CPU and GPU over `window` (0..=1), or `None` if neither could be read.
@@ -123,6 +160,44 @@ mod tests {
         assert_eq!(parse_nvidia_smi("12\n87\n"), Some(0.87));
         assert_eq!(parse_nvidia_smi("[N/A]\n"), None);
         assert_eq!(parse_nvidia_smi(""), None);
+    }
+
+    fn shell(script: &str) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn a_quick_command_gives_its_output() {
+        assert_eq!(
+            output_within(shell("echo 42"), Duration::from_secs(5)).as_deref(),
+            Some("42\n")
+        );
+    }
+
+    #[test]
+    fn a_failing_command_gives_nothing() {
+        assert_eq!(
+            output_within(shell("echo 42; exit 1"), Duration::from_secs(5)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_hung_command_is_given_up_on_in_time() {
+        let started = std::time::Instant::now();
+        output_within(shell("sleep 5"), Duration::from_millis(100));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_hung_command_gives_nothing() {
+        assert_eq!(output_within(shell("sleep 5"), Duration::from_millis(100)), None);
     }
 
     #[test]
