@@ -272,7 +272,10 @@ mod tests {
     fn every_transform_is_undone_exactly() {
         use Transform::{Flipped, Flipped90, Flipped180, Flipped270, Normal, Rotate90, Rotate180, Rotate270};
         // 3x2, every pixel different: no symmetry can hide a wrong turn.
-        let picture = RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let picture = RgbaImage::from_fn(3, 2, |x, y| {
+            let byte = |v: u32| u8::try_from(v).expect("a 3x2 picture's coordinates fit a byte");
+            image::Rgba([byte(x), byte(y), 0, 255])
+        });
         for t in [
             Normal, Rotate90, Rotate180, Rotate270, Flipped, Flipped90, Flipped180, Flipped270,
         ] {

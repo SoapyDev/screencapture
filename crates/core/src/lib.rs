@@ -14,5 +14,6 @@ pub mod naming;
 pub mod overlay;
 pub mod selection;
 pub mod trace;
+pub mod units;
 
 pub use trace::{trace, trace_restart};

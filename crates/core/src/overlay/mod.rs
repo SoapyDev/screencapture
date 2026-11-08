@@ -39,6 +39,8 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
+use crate::units::{ToF32, saturating_i32, unsigned};
+
 #[cfg(unix)]
 use crate::daemon;
 use crate::{
@@ -111,7 +113,7 @@ fn borrowed(screens: &[(MonitorInfo, Arc<RenderImage>)]) -> anyhow::Result<Snaps
         .map(|(m, image)| {
             let size = image.size(0);
             let bytes = image.as_bytes(0).unwrap_or_default();
-            let image = image::ImageBuffer::from_raw(size.width.0 as u32, size.height.0 as u32, bytes)
+            let image = image::ImageBuffer::from_raw(unsigned(size.width.0), unsigned(size.height.0), bytes)
                 .ok_or_else(|| anyhow::anyhow!("frozen image of {} has the wrong size", m.name))?;
             Ok(Shot {
                 name: m.name.clone(),
@@ -125,6 +127,10 @@ fn borrowed(screens: &[(MonitorInfo, Arc<RenderImage>)]) -> anyhow::Result<Snaps
 }
 
 /// Capture every monitor.
+///
+/// # Errors
+///
+/// When the display server refuses the capture, or there is no screen.
 pub fn freeze() -> anyhow::Result<Frozen> {
     let snapshot = Snapshot::take()?;
     trace("screens frozen");
@@ -170,6 +176,10 @@ pub fn mark_saved() {
 
 /// Open the overlay once `frozen` (started before gpui, to overlap its start-up) is ready, and
 /// run until the capture is saved or cancelled. Returns whether a file was saved.
+///
+/// # Panics
+///
+/// When the capture thread behind `frozen` panicked: that panic is passed on.
 pub fn run(
     mode: Mode,
     frozen: std::thread::JoinHandle<anyhow::Result<Frozen>>,
@@ -465,7 +475,13 @@ fn displays_by_pointer(o: &Overlay, cx: &App) -> Vec<(Rc<dyn PlatformDisplay>, M
     let pointer = o.selection.hovered().map(|m| m.name.as_str());
     let shown = |display: Rc<dyn PlatformDisplay>| {
         let origin = display.bounds().origin;
-        let i = layout::match_display((f32::from(origin.x) as i32, f32::from(origin.y) as i32), monitors)?;
+        let i = layout::match_display(
+            (
+                saturating_i32(f32::from(origin.x)),
+                saturating_i32(f32::from(origin.y)),
+            ),
+            monitors,
+        )?;
         Some((display, monitors[i].clone()))
     };
     let mut displays: Vec<_> = cx.displays().into_iter().filter_map(shown).collect();
@@ -530,7 +546,7 @@ fn window_options(
 /// A window the size of `screen`.
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 fn windowed(screen: Rect) -> WindowBounds {
-    let size = size(px(screen.w as f32), px(screen.h as f32));
+    let size = size(px(screen.w.to_f32()), px(screen.h.to_f32()));
     WindowBounds::Windowed(Bounds::new(Point::default(), size))
 }
 
@@ -961,7 +977,7 @@ impl Overlay {
 
     fn cursor(&self) -> CursorStyle {
         let pointer = self.selection.pointer();
-        let point = pointer.map(|(x, y)| (x as f32, y as f32));
+        let point = pointer.map(|(x, y)| (x.to_f32(), y.to_f32()));
         let decided = point.and_then(|point| self.features.iter().find_map(|f| f.cursor(point)));
         if let Some(style) = decided {
             return style;
@@ -1027,8 +1043,8 @@ fn arrow(key: &str) -> Option<(i32, i32)> {
 }
 
 /// A desktop point to whole pixels, as the selection counts.
-const fn rounded((x, y): feature::Point) -> (i32, i32) {
-    (x.round() as i32, y.round() as i32)
+fn rounded((x, y): feature::Point) -> (i32, i32) {
+    (saturating_i32(x.round()), saturating_i32(y.round()))
 }
 
 /// One monitor's overlay window.
@@ -1049,7 +1065,7 @@ pub fn panel() -> Div {
         .gap_1()
         .p_1()
         .rounded_lg()
-        .bg(rgba(0x1e1e22f0))
+        .bg(rgba(0x1e1e_22f0))
         .border_1()
         .border_color(hsla(0., 0., 1., 0.12))
         .text_sm()
@@ -1150,10 +1166,10 @@ const HANDLE: i32 = 8;
 pub fn rect_div(r: Rect) -> Div {
     div()
         .absolute()
-        .left(px(r.x as f32))
-        .top(px(r.y as f32))
-        .w(px(r.w as f32))
-        .h(px(r.h as f32))
+        .left(px(r.x.to_f32()))
+        .top(px(r.y.to_f32()))
+        .w(px(r.w.to_f32()))
+        .h(px(r.h.to_f32()))
 }
 
 #[must_use]
@@ -1167,8 +1183,8 @@ pub fn handle_div(x: i32, y: i32) -> Div {
 /// Window-local position to global logical desktop coordinates.
 fn to_global(monitor: Rect, p: Point<Pixels>) -> feature::Point {
     (
-        monitor.x as f32 + f32::from(p.x),
-        monitor.y as f32 + f32::from(p.y),
+        monitor.x.to_f32() + f32::from(p.x),
+        monitor.y.to_f32() + f32::from(p.y),
     )
 }
 
@@ -1304,11 +1320,11 @@ fn size_label(selected: Rect, shown: Rect, screen_height: i32) -> Div {
     };
     div()
         .absolute()
-        .left(px(shown.x.max(0) as f32))
-        .top(px(top as f32))
+        .left(px(shown.x.max(0).to_f32()))
+        .top(px(top.to_f32()))
         .px_2()
         .rounded_sm()
-        .bg(rgba(0x000000c0))
+        .bg(rgba(0x0000_00c0))
         .text_xs()
         .text_color(gpui::white())
         .child(format!("{} × {}", selected.w, selected.h))
@@ -1327,7 +1343,7 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
         .px_4()
         .py_2()
         .rounded_lg()
-        .bg(rgba(0x000000a0))
+        .bg(rgba(0x0000_00a0))
         .text_2xl()
         .font_weight(FontWeight::BOLD)
         .text_color(gpui::white())

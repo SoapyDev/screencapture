@@ -468,7 +468,7 @@ fn read_within(queue: &EventQueue<State>, left: std::time::Duration) -> Result<(
     let fd = guard.connection_fd();
     let mut fds = [PollFd::new(&fd, PollFlags::IN)];
     let wait = Timespec {
-        tv_sec: left.as_secs() as _,
+        tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
         tv_nsec: left.subsec_nanos().into(),
     };
     match rustix::event::poll(&mut fds, Some(&wait)) {
@@ -543,8 +543,13 @@ fn new_buffer(state: &State, spec: BufferSpec, qh: &QueueHandle<State>) -> Resul
     let size = spec.stride as usize * spec.height as usize;
     let (fd, map) = shared_memory(size)?;
     let shm = state.shm.as_ref().context("wl_shm not bound")?;
-    let pool: WlShmPool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
-    let (width, height, stride) = (spec.width as i32, spec.height as i32, spec.stride as i32);
+    let fits = |value: usize| i32::try_from(value).context("a screen buffer over 2 GiB");
+    let pool: WlShmPool = shm.create_pool(fd.as_fd(), fits(size)?, qh, ());
+    let (width, height, stride) = (
+        fits(spec.width as usize)?,
+        fits(spec.height as usize)?,
+        fits(spec.stride as usize)?,
+    );
     let buffer = pool.create_buffer(0, width, height, stride, spec.wl_format, qh, ());
     pool.destroy();
     Ok((spec, map, buffer))
@@ -819,7 +824,7 @@ mod tests {
         let shots = capture(&|m| m.name == first.name).unwrap();
         assert_eq!(shots.len(), 1);
         assert_eq!(shots[0].rect, first.rect);
-        assert!(shots[0].image.width() >= first.rect.w as u32);
+        assert!(shots[0].image.width() >= crate::units::unsigned(first.rect.w));
         // A real screen is not one flat transparent colour.
         assert!(shots[0].image.pixels().any(|p| p[3] == 255));
     }

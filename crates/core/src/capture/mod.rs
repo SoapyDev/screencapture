@@ -107,21 +107,25 @@ impl Rect {
     }
 
     /// Parse slurp-style geometry: `X,Y WxH`.
-    pub fn parse(s: &str) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// When `geometry` is not `X,Y WxH`, or its size is empty.
+    pub fn parse(geometry: &str) -> Result<Self> {
         let parse = || -> Option<Self> {
-            let (pos, size) = s.trim().split_once(' ')?;
-            let (x, y) = pos.split_once(',')?;
-            let (w, h) = size.trim().split_once('x')?;
+            let (position, size) = geometry.trim().split_once(' ')?;
+            let (left, top) = position.split_once(',')?;
+            let (width, height) = size.trim().split_once('x')?;
             Some(Self::new(
-                x.parse().ok()?,
-                y.parse().ok()?,
-                w.parse().ok()?,
-                h.parse().ok()?,
+                left.parse().ok()?,
+                top.parse().ok()?,
+                width.parse().ok()?,
+                height.parse().ok()?,
             ))
         };
         match parse() {
-            Some(r) if !r.is_empty() => Ok(r),
-            _ => bail!("invalid geometry {s:?}, expected \"X,Y WxH\" (e.g. \"100,200 640x480\")"),
+            Some(rect) if !rect.is_empty() => Ok(rect),
+            _ => bail!("invalid geometry {geometry:?}, expected \"X,Y WxH\" (e.g. \"100,200 640x480\")"),
         }
     }
 }
@@ -170,6 +174,10 @@ macro_rules! dispatch {
 }
 
 /// List monitors without capturing them.
+///
+/// # Errors
+///
+/// When the display server can't be reached or won't list its screens.
 pub fn monitors() -> Result<Vec<MonitorInfo>> {
     dispatch!(wlr::monitors(), xcap_backend::monitors())
 }
@@ -191,6 +199,10 @@ pub struct Session {
 
 impl Session {
     /// Every monitor, frozen at once. Same backend choice (and xcap fallback) as one-off captures.
+    ///
+    /// # Errors
+    ///
+    /// When the display server refuses the capture, or there is no screen.
     // Without Wayland there is nothing to keep between captures.
     #[cfg_attr(
         not(all(target_os = "linux", feature = "wayland")),
@@ -290,17 +302,30 @@ struct Piece<'a, C> {
 
 impl Snapshot {
     /// Capture only the monitors `wanted` accepts; skipping the rest saves time.
+    ///
+    /// # Errors
+    ///
+    /// When the display server refuses the capture, or `wanted` accepts no screen.
     pub fn take_where(wanted: impl Fn(&MonitorInfo) -> bool) -> Result<Self> {
         Self::new(capture_shots(&wanted)?)
     }
 
     /// Every monitor, frozen at once.
+    ///
+    /// # Errors
+    ///
+    /// When the display server refuses the capture, or there is no screen.
     pub fn take() -> Result<Self> {
         Self::take_where(|_| true)
     }
 }
 
 impl<C: Deref<Target = [u8]>> Snapshot<C> {
+    /// The screens of `shots`, in layout order.
+    ///
+    /// # Errors
+    ///
+    /// When `shots` is empty.
     pub fn new(mut shots: Vec<Shot<C>>) -> Result<Self> {
         if shots.is_empty() {
             bail!("no monitors found");
@@ -310,6 +335,10 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
     }
 
     /// The image `request` asks for.
+    ///
+    /// # Errors
+    ///
+    /// When the region touches no screen, or a named screen doesn't exist.
     pub fn grab(&self, request: &crate::selection::Request) -> Result<RgbaImage> {
         use crate::selection::Request;
         match request {
@@ -325,6 +354,10 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
     }
 
     /// Cut an arbitrary desktop region. Parts outside every monitor are transparent.
+    ///
+    /// # Errors
+    ///
+    /// When `region` touches no screen.
     pub fn crop(&self, region: Rect) -> Result<RgbaImage> {
         let pieces = self.crop_pieces(region)?;
         Ok(render(&pieces, region.w, region.h))
@@ -352,6 +385,10 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
     /// Stitch the named monitors into one contiguous image. Monitors keep their relative
     /// layout, but empty bands between them (e.g. an unselected screen in the middle) are
     /// removed so the result has no gaps.
+    ///
+    /// # Errors
+    ///
+    /// When a name matches no screen, or `names` is empty.
     pub fn stitch(&self, names: &[String]) -> Result<RgbaImage> {
         let (pieces, w, h) = self.stitch_pieces(names)?;
         Ok(render(&pieces, w, h))
@@ -392,6 +429,10 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
     }
 
     /// How [`Self::grab`] lays out the desktop for `request`, and its pixels per logical pixel.
+    ///
+    /// # Errors
+    ///
+    /// When the region touches no screen, or a named screen doesn't exist.
     pub fn placements(&self, request: &crate::selection::Request) -> Result<(Vec<Placement>, f64)> {
         use crate::selection::Request;
         let pieces = match request {
@@ -412,6 +453,11 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
         ))
     }
 
+    /// Every screen stitched into one image.
+    ///
+    /// # Errors
+    ///
+    /// None in practice: a snapshot holds at least one screen, each found by its own name.
     pub fn all(&self) -> Result<RgbaImage> {
         self.stitch(&self.names())
     }
@@ -476,7 +522,7 @@ fn output_scale<C: Deref<Target = [u8]>>(pieces: &[Piece<C>]) -> f64 {
 /// Draw pieces onto a transparent canvas of `w`x`h` logical pixels, at [`output_scale`].
 fn render<C: Deref<Target = [u8]>>(pieces: &[Piece<C>], w: i32, h: i32) -> RgbaImage {
     let scale = output_scale(pieces);
-    let px = |v: i32| (f64::from(v) * scale).round() as u32;
+    let px = |v: i32| crate::units::saturating_u32((f64::from(v) * scale).round());
     let mut canvas = RgbaImage::new(px(w), px(h));
     for piece in pieces {
         let (dx, dy) = (i64::from(px(piece.dst.0)), i64::from(px(piece.dst.1)));
@@ -496,7 +542,7 @@ impl<C: Deref<Target = [u8]>> Piece<'_, C> {
     /// This piece of its screen's image, in that screen's pixels.
     fn cut(&self) -> image::SubImage<&ImageBuffer<Rgba<u8>, C>> {
         let scale = self.shot.scale();
-        let px = |v: i32| (f64::from(v) * scale).round() as u32;
+        let px = |v: i32| crate::units::saturating_u32((f64::from(v) * scale).round());
         let (x, y) = (
             px(self.src.x - self.shot.rect.x),
             px(self.src.y - self.shot.rect.y),
@@ -514,8 +560,8 @@ mod tests {
 
     fn shot(name: &str, rect: Rect, scale: u32, color: u8) -> Shot {
         let image = RgbaImage::from_pixel(
-            rect.w as u32 * scale,
-            rect.h as u32 * scale,
+            crate::units::unsigned(rect.w) * scale,
+            crate::units::unsigned(rect.h) * scale,
             Rgba([color, 0, 0, 255]),
         );
         Shot {
@@ -678,7 +724,9 @@ mod tests {
         swap_red_blue(&mut small);
         assert_eq!(small, vec![3, 2, 1, 4, 7, 6, 5, 8]);
         // Big enough for bands, and not a multiple of their size.
-        let original: Vec<u8> = (0..(3 << 20) + 4 * 7).map(|i| (i % 253) as u8).collect();
+        let original: Vec<u8> = (0..(3 << 20) + 4 * 7)
+            .map(|i| u8::try_from(i % 253).expect("a remainder of 253 fits a byte"))
+            .collect();
         let mut big = original.clone();
         swap_red_blue(&mut big);
         for (a, b) in big.as_chunks::<4>().0.iter().zip(original.as_chunks::<4>().0) {

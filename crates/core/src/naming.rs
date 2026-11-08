@@ -14,6 +14,14 @@ pub fn stamp(time: DateTime<Local>) -> String {
 
 /// Create a new, empty file in `dir` (created if missing) named `<prefix>_<timestamp>.<ext>`,
 /// with `_1`, `_2`, ... appended if taken. Existing files are never touched.
+///
+/// # Errors
+///
+/// When `dir` can't be created, or a file can't be created in it.
+///
+/// # Panics
+///
+/// Never: the search counts on until a name is free.
 pub fn reserve(
     dir: &Path,
     prefix: &str,

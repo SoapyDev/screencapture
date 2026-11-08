@@ -399,11 +399,11 @@ mod tests {
     fn monitors() -> Vec<MonitorInfo> {
         ["DP-1", "HDMI-A-1", "DP-2"]
             .iter()
-            .enumerate()
-            .map(|(i, name)| MonitorInfo {
+            .zip((0..).step_by(100))
+            .map(|(name, left)| MonitorInfo {
                 name: (*name).into(),
-                rect: Rect::new(i as i32 * 100, 0, 100, 50),
-                output_position: (i as i32 * 100, 0),
+                rect: Rect::new(left, 0, 100, 50),
+                output_position: (left, 0),
                 refresh_mhz: None,
             })
             .collect()

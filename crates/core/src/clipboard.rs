@@ -122,6 +122,11 @@ mod native {
     struct State;
 
     impl Server {
+        /// Connect to the compositor's clipboard and serve it from a thread of its own.
+        ///
+        /// # Errors
+        ///
+        /// When Wayland can't be reached, lacks data control or a seat, or the thread can't start.
         pub fn start() -> Result<Self> {
             let conn = Connection::connect_to_env().context("connecting to Wayland")?;
             let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -251,7 +256,9 @@ mod tests {
     #[test]
     #[ignore = "replaces your clipboard; needs a wlroots session and wl-paste"]
     fn the_daemon_serves_the_png_until_replaced() {
-        let png: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+        let png: Vec<u8> = (0..300_000)
+            .map(|i| u8::try_from(i % 251).expect("a remainder of 251 fits a byte"))
+            .collect();
         let server = Server::start().unwrap();
         server.offer(png.clone());
         // Give the compositor the new selection before asking for it.

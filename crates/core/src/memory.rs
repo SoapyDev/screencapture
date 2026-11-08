@@ -7,6 +7,10 @@
 
 /// Pin glibc's mmap threshold so screen-sized buffers are always mapped, and unmapped when
 /// freed. Measured: no cost to capture latency (fresh pages come as transparent huge pages).
+///
+/// # Errors
+///
+/// When glibc refuses a setting.
 pub fn tune() -> anyhow::Result<()> {
     // Setting either disables glibc's dynamic adjustment of both.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]

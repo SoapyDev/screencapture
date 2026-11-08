@@ -205,6 +205,10 @@ impl Client {
 
 /// Make sure `dir` exists, is a real directory (not a symlink) owned by us, and is closed to
 /// everyone else; create it `0700` if missing. The socket inside is only as safe as this.
+///
+/// # Errors
+///
+/// When `dir` can't be created, or is a symlink, someone else's, or open to others.
 pub fn ensure_private_dir(dir: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     if std::fs::symlink_metadata(dir).is_err() {
@@ -232,6 +236,11 @@ fn check_private_dir(dir: &Path) -> Result<()> {
 }
 
 /// Bind the socket, replacing a stale one. Fails if another daemon is alive.
+///
+/// # Errors
+///
+/// When another daemon answers at `path`, its folder isn't private, or the socket can't be
+/// bound.
 pub fn bind(path: &Path) -> Result<UnixListener> {
     use anyhow::Context;
     if UnixStream::connect(path).is_ok() {
@@ -341,7 +350,7 @@ pub fn readable_within(listener: &UnixListener, wait: std::time::Duration) -> bo
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         let timeout = Timespec {
-            tv_sec: left.as_secs() as _,
+            tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
             tv_nsec: left.subsec_nanos().into(),
         };
         let mut fds = [PollFd::new(listener, PollFlags::IN)];

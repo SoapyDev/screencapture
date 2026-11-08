@@ -59,6 +59,10 @@ impl Config {
 
     /// Replace the file at `path` whole: written beside it, then renamed over it, so a reader
     /// (or a crash) never finds it half-written.
+    ///
+    /// # Errors
+    ///
+    /// When the folder can't be created, or the file can't be written or renamed.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -75,12 +79,19 @@ impl Config {
         Self::path().map_or_else(Self::default, |path| Self::load_from(&path))
     }
 
+    /// # Errors
+    ///
+    /// When the folder can't be created, or the file can't be written or renamed.
     pub fn save(&self) -> Result<()> {
         Self::path().map_or(Ok(()), |path| self.save_to(&path))
     }
 }
 
 /// Remember `section` in the config file (~20 µs), keeping everything else in it.
+///
+/// # Errors
+///
+/// When the config file can't be written.
 pub fn remember<S: Section>(section: &S) -> Result<()> {
     let mut config = Config::load();
     config.set_section(section);

@@ -51,9 +51,9 @@ fn notice_line(text: &SharedString) -> Div {
     div()
         .px_2()
         .rounded_sm()
-        .bg(rgba(0x000000c0))
+        .bg(rgba(0x0000_00c0))
         .text_sm()
-        .text_color(rgba(0xff8a80ff))
+        .text_color(rgba(0xff8a_80ff))
         .child(text.clone())
 }
 
