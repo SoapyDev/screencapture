@@ -1,5 +1,7 @@
-//! The bottom action bar: what to do with the selection, side by side from every feature, then
-//! each feature's settings. It slides away with the toolbar when a feature takes over.
+//! The bottom action bar: the features' round buttons side by side on one bar.
+//!
+//! Resting the pointer on a button opens a bar of its options above it. The bars slide away
+//! with the toolbar when a feature takes over.
 
 use std::{cell::Cell, rc::Rc, time::Duration};
 
@@ -10,7 +12,7 @@ use gpui::{
 
 use super::{
     Overlay,
-    drawer::{self, WantedSize},
+    drawer::{self, Placement},
     drawers::{Drawers, Part},
     feature::Actions,
     layout::Edge,
@@ -26,19 +28,19 @@ pub const SLIDE: Duration = Duration::from_millis(150);
 /// Distance of the bars from their screen edge.
 pub const EDGE_GAP: f32 = 24.;
 /// Room the action bar takes at the bottom: a toolbar at the bottom sits above it.
-pub const ACTION_BAR_ROOM: f32 = 48.;
+pub const ACTION_BAR_ROOM: f32 = 72.;
 /// How far the bars travel when they slide away: past any screen edge.
 const SLIDE_DISTANCE: f32 = 240.;
-
-/// How wide a drawer would like to be, and its room around the screen's edge.
-const DRAWER_WIDTH: i32 = 780;
-const DRAWER_HEIGHT: i32 = 160;
+/// How wide an options bar would like to be.
+const OPTIONS_WIDTH: i32 = 780;
+/// How far an options bar slides up as it opens.
+const RISE: f32 = 12.;
 
 /// What the action bar is drawn from.
 pub struct ActionBar<'a> {
     pub overlay: &'a Entity<Overlay>,
     pub drawers: &'a Drawers,
-    /// Where the buttons rest, filled in as they are painted.
+    /// Where the buttons' bar is, filled in as it is painted.
     pub anchor: &'a Rc<Cell<Option<Rect>>>,
     /// The screen, in the window's own coordinates.
     pub screen: Rect,
@@ -47,14 +49,13 @@ pub struct ActionBar<'a> {
 impl ActionBar<'_> {
     /// The bar for every feature's `actions`, with `notice` above it.
     pub fn render(&self, actions: Vec<Actions>, notice: Option<&SharedString>, leaving: bool) -> AnyElement {
-        let (shift, width) = self.room_for_drawers();
         let column = div()
             .flex()
             .flex_col()
             .items_center()
             .gap_1()
             .children(notice.map(notice_line))
-            .child(self.anchored(self.buttons(actions, width), shift));
+            .child(self.measured(self.buttons(actions)));
         let place = div()
             .absolute()
             .left_0()
@@ -65,60 +66,56 @@ impl ActionBar<'_> {
         slide(place, Edge::Bottom, EDGE_GAP, leaving, "action-bar")
     }
 
-    /// How far to move the buttons right so a drawer fits on their left, and how wide the
-    /// drawer then is. The buttons rest there whether or not a drawer is open, so they never
-    /// move away from under the pointer.
-    fn room_for_drawers(&self) -> (i32, i32) {
-        let Some(resting) = self.anchor.get() else {
-            return (0, DRAWER_WIDTH);
-        };
-        let wanted = WantedSize {
-            width: DRAWER_WIDTH,
-            height: DRAWER_HEIGHT,
-        };
-        let placed = drawer::place(resting, resting, wanted, self.screen, saturating_i32(EDGE_GAP));
-        (placed.column.x - resting.x, placed.drawer.w)
-    }
-
-    /// `buttons`, moved right by `shift`, with a measure of where they would rest unmoved.
-    fn anchored(&self, buttons: Div, shift: i32) -> Div {
+    /// `bar`, with a note of where it is painted: the options bars centre on its buttons.
+    fn measured(&self, bar: Div) -> Div {
         let anchor = Rc::clone(self.anchor);
         let measure = canvas(
             move |bounds, window, _| remember_bounds(&anchor, bounds, window),
             |_, (), _, _| {},
         );
-        div()
-            .relative()
-            .child(measure.absolute().size_full())
-            .child(buttons.relative().left(px(shift.to_f32())))
+        div().relative().child(measure.absolute().size_full()).child(bar)
     }
 
-    /// The feature's round buttons, one over the other with a gap to see the screen through,
-    /// each with its drawer.
-    fn buttons(&self, actions: Vec<Actions>, drawer_width: i32) -> Div {
-        let cells = actions
+    /// The features' round buttons side by side on a pill-shaped bar, each with its options.
+    fn buttons(&self, actions: Vec<Actions>) -> Div {
+        let with_buttons: Vec<_> = actions
             .into_iter()
             .enumerate()
-            .filter(|(_, actions)| !actions.main.is_empty());
-        let cells = cells.map(|(index, actions)| self.cell(index, actions, drawer_width));
-        div().flex().flex_col().gap_2().children(cells)
+            .filter(|(_, actions)| !actions.main.is_empty())
+            .collect();
+        let count = with_buttons.len();
+        let cells = with_buttons
+            .into_iter()
+            .enumerate()
+            .map(|(position, (index, actions))| self.cell(index, actions, (position, count)));
+        super::panel().rounded_full().gap_2().px_2().children(cells)
     }
 
-    fn cell(&self, index: usize, actions: Actions, drawer_width: i32) -> Div {
+    /// One button, with its options bar above it while open. `(position, count)` is its place among
+    /// the buttons, to find where its centre is.
+    fn cell(&self, index: usize, actions: Actions, (position, count): (usize, usize)) -> Div {
         let shown = self.drawers.state(index).is_shown() && !actions.drawer.is_empty();
         let hovered = self.hover_listener(index, Part::Button);
         let button = div()
             .id(("action", index))
             .on_hover(hovered)
             .children(actions.main);
-        let drawer = shown.then(|| self.drawer(index, actions.drawer, drawer_width));
-        div().relative().child(button).children(drawer)
+        let options = shown.then(|| self.options(index, actions.drawer, self.placement(position, count)));
+        div().relative().child(button).children(options)
     }
 
-    /// The drawer: a bar on the button's left, at its height, sliding out of it. Its options
-    /// stay in one row while they fit in `width`, then wrap. The room around the bar is not
-    /// part of it: only the bar itself catches the pointer.
-    fn drawer(&self, index: usize, options: Vec<AnyElement>, width: i32) -> Div {
+    /// Where the options bar of button `position` of `count` goes.
+    fn placement(&self, position: usize, count: usize) -> Placement {
+        let resting = self.anchor.get().unwrap_or(Rect::new(0, 0, 0, 0));
+        let center =
+            resting.x + resting.w * saturating_i32(position.to_f32() + 0.5) / saturating_i32(count.to_f32());
+        drawer::place_above(center, OPTIONS_WIDTH, self.screen, saturating_i32(EDGE_GAP))
+    }
+
+    /// The options: a rounded bar above the button, rising and fading in. Its options stay in
+    /// one row while they fit, then wrap. Only the bar catches the pointer, not the room
+    /// around it.
+    fn options(&self, index: usize, options: Vec<AnyElement>, placement: Placement) -> Div {
         let overlay = self.overlay.clone();
         let pinned = move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
             overlay.update(cx, |overlay, cx| overlay.drawer_pressed(index, cx));
@@ -128,9 +125,10 @@ impl ActionBar<'_> {
             .id(("drawer", index))
             .rounded_full()
             .px_2()
-            .max_w_full()
-            .flex_wrap();
+            .flex_none();
         let bar = bar
+            .max_w(px(placement.width.to_f32()))
+            .flex_wrap()
             .on_hover(self.hover_listener(index, Part::Drawer))
             .on_mouse_move(self.moved_listener(index))
             .on_mouse_down(MouseButton::Left, pinned)
@@ -138,15 +136,16 @@ impl ActionBar<'_> {
             .with_animation(
                 ("drawer-in", index),
                 Animation::new(SLIDE).with_easing(ease_in_out),
-                |bar, delta| bar.opacity(delta).mr(px(-24. * (1. - delta))),
+                |bar, delta| bar.opacity(delta).relative().top(px(RISE * (1. - delta))),
             );
-        let place = div().absolute().right_full().bottom_0().w(px(width.to_f32()));
-        place
-            .pr(px(drawer::GAP.to_f32()))
-            .flex()
-            .justify_end()
-            .items_center()
-            .child(bar)
+        let sideways = div().relative().left(px(placement.shift.to_f32())).child(bar);
+        let above = div()
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .right_0()
+            .pb(px(drawer::GAP.to_f32()));
+        above.flex().justify_center().child(sideways)
     }
 
     /// Moving over the bar says the pointer is on it, in case the enter was missed.

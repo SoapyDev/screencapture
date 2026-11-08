@@ -1,4 +1,4 @@
-//! A drawer that opens beside a button: when it opens and closes, and where it goes.
+//! A drawer that opens above a button: when it opens and closes, and where it goes.
 //!
 //! Resting the pointer on the button (or the drawer) opens it; leaving closes it after a short
 //! linger, so a slip of the hand doesn't. Clicking inside pins it open until a click outside, the
@@ -12,7 +12,7 @@ use crate::capture::Rect;
 pub const DWELL: Duration = Duration::from_millis(120);
 /// Time away from the button and the drawer before it closes.
 pub const LINGER: Duration = Duration::from_millis(300);
-/// Space between the button and its drawer.
+/// Space between the button and its options bar.
 pub const GAP: i32 = 4;
 
 /// Whether the drawer is open, and why.
@@ -113,46 +113,29 @@ impl Drawer {
     }
 }
 
-/// How big the drawer would like to be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WantedSize {
-    pub width: i32,
-    pub height: i32,
-}
-
-/// Where everything goes while the drawer is open.
+/// Where an options bar goes: how wide, and how far to slide sideways to stay on the screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
-    /// The column of buttons, moved right if the drawer needed the room.
-    pub column: Rect,
-    /// The button the drawer belongs to.
-    pub button: Rect,
-    /// The drawer: left of the button, its bottom on the button's bottom; the content wraps in
-    /// this width.
-    pub drawer: Rect,
+    /// The most the bar may take; its content wraps beyond.
+    pub width: i32,
+    /// Added to the bar's centred position (negative: left).
+    pub shift: i32,
 }
 
-/// Where a drawer for `button` (in `column`) opens on `screen`, `margin` from its edges.
+/// Where the options bar for a button centred at `center` goes on `screen`, `margin` from its
+/// edges.
 ///
-/// To the left of the button, over whatever is there. With too little room the column moves
-/// right as far as the margin allows, and then the drawer narrows (its content wraps).
+/// Centred over the button, slid sideways just enough to stay inside, and no wider than the
+/// screen allows (its content wraps then).
 #[must_use]
-pub fn place(column: Rect, button: Rect, wanted: WantedSize, screen: Rect, margin: i32) -> Placement {
-    let room_left = |from: i32| from - GAP - (screen.x + margin);
-    let missing = (wanted.width - room_left(column.x)).max(0);
-    let room_right = (screen.right() - margin - column.right()).max(0);
-    let shift = missing.min(room_right);
-    let width = wanted.width.min(room_left(column.x + shift)).max(0);
-    let moved = |rect: Rect| Rect {
-        x: rect.x + shift,
-        ..rect
-    };
-    let button = moved(button);
-    let top = (button.bottom() - wanted.height).max(screen.y + margin);
+pub fn place_above(center: i32, wanted_width: i32, screen: Rect, margin: i32) -> Placement {
+    let width = wanted_width.min(screen.w - 2 * margin).max(0);
+    let left = center - width / 2;
+    let leftmost = screen.x + margin;
+    let rightmost = (screen.right() - margin - width).max(leftmost);
     Placement {
-        column: moved(column),
-        button,
-        drawer: Rect::new(button.x - GAP - width, top, width, button.bottom() - top),
+        width,
+        shift: left.clamp(leftmost, rightmost) - left,
     }
 }
 
@@ -321,80 +304,35 @@ mod tests {
     }
 
     const SCREEN: Rect = Rect::new(0, 0, 1000, 600);
-    const WANTED: WantedSize = WantedSize {
-        width: 300,
-        height: 120,
-    };
 
-    fn column_at(x: i32) -> Rect {
-        Rect::new(x, 500, 100, 70)
-    }
-
-    fn button_in(column: Rect) -> Rect {
-        Rect::new(column.x, column.y + 35, column.w, 35)
-    }
-
-    fn placed(x: i32) -> Placement {
-        let column = column_at(x);
-        place(column, button_in(column), WANTED, SCREEN, 24)
+    #[test]
+    fn with_room_on_both_sides_the_bar_stays_centred() {
+        assert_eq!(place_above(500, 300, SCREEN, 24).shift, 0);
     }
 
     #[test]
-    fn with_room_on_the_left_nothing_moves() {
-        assert_eq!(placed(450).column, column_at(450));
+    fn the_bar_has_the_wanted_width_when_it_fits() {
+        assert_eq!(place_above(500, 300, SCREEN, 24).width, 300);
     }
 
     #[test]
-    fn the_drawer_sits_left_of_its_button_with_a_gap() {
-        assert_eq!(placed(450).drawer.right(), 450 - GAP);
+    fn near_the_left_edge_the_bar_slides_right() {
+        assert_eq!(place_above(100, 300, SCREEN, 24).shift, 74);
     }
 
     #[test]
-    fn the_drawer_has_the_wanted_width_when_there_is_room() {
-        assert_eq!(placed(450).drawer.w, 300);
+    fn near_the_right_edge_the_bar_slides_left() {
+        assert_eq!(place_above(900, 300, SCREEN, 24).shift, -74);
     }
 
     #[test]
-    fn the_drawer_grows_up_from_its_buttons_bottom() {
-        assert_eq!(placed(450).drawer.bottom(), 570);
+    fn a_bar_wider_than_the_screen_narrows_to_the_margins() {
+        assert_eq!(place_above(500, 2000, SCREEN, 24).width, 952);
     }
 
     #[test]
-    fn with_too_little_room_the_column_moves_right() {
-        assert!(placed(200).column.x > 200);
-    }
-
-    #[test]
-    fn the_button_moves_with_the_column() {
-        let placement = placed(200);
-        assert_eq!(placement.button.x, placement.column.x);
-    }
-
-    #[test]
-    fn once_moved_the_drawer_has_the_wanted_width() {
-        assert_eq!(placed(200).drawer.w, 300);
-    }
-
-    #[test]
-    fn the_column_never_passes_the_right_margin() {
-        assert!(placed(10).column.right() <= SCREEN.right() - 24);
-    }
-
-    #[test]
-    fn on_a_small_screen_the_drawer_narrows_to_fit() {
-        let screen = Rect::new(0, 0, 300, 600);
-        let column = Rect::new(150, 500, 100, 70);
-        let drawer = place(column, button_in(column), WANTED, screen, 24).drawer;
-        assert!(drawer.x >= 24);
-    }
-
-    #[test]
-    fn a_drawer_taller_than_the_room_above_stops_at_the_top_margin() {
-        let tall = WantedSize {
-            width: 300,
-            height: 900,
-        };
-        let column = column_at(450);
-        assert_eq!(place(column, button_in(column), tall, SCREEN, 24).drawer.y, 24);
+    fn a_narrowed_bar_fills_the_space_between_the_margins() {
+        let placed = place_above(300, 2000, SCREEN, 24);
+        assert_eq!(300 - placed.width / 2 + placed.shift, 24);
     }
 }
