@@ -238,6 +238,7 @@ pub fn run_daemon(
         cx.set_global(FeatureList(features));
         cx.set_quit_mode(QuitMode::Explicit);
         warm_up(cx);
+        std::thread::spawn(look::read_ahead);
         // This process outlives every capture: it can keep the copied image on offer itself.
         crate::clipboard::serve();
         let (tx, rx) = futures::channel::mpsc::unbounded();

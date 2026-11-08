@@ -2,7 +2,10 @@
 //! accent) the portal's, asked off the first frame's path. Found once per program run, so a
 //! resident daemon does no disk or D-Bus work on later captures.
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{
+    Arc, PoisonError, RwLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use gpui::{App, Entity};
 
@@ -20,21 +23,25 @@ use crate::config::Config;
 /// it on the first capture only; a change on disk needs a restart.
 static FOUND: RwLock<Option<Arc<DesktopColours>>> = RwLock::new(None);
 
+/// Whether the portal was asked for an accent already: once per program run.
+#[cfg(target_os = "linux")]
+static PORTAL_ASKED: AtomicBool = AtomicBool::new(false);
+
 /// Paint the overlay in the desktop's colours from now on.
 pub fn follow_desktop(overlay: &Entity<Overlay>, cx: &App) {
     let colours = found_colours(overlay, cx);
     theme::set_current(colours.theme(Scheme::from(cx.window_appearance())));
 }
 
-/// The colours found at the first call; the later calls only hand them back.
+/// The colours found at the first call (or read ahead); the later calls only hand them back.
 fn found_colours(overlay: &Entity<Overlay>, cx: &App) -> Arc<DesktopColours> {
-    if let Some(kept) = kept() {
-        return kept;
-    }
-    let colours = Arc::new(read_desktop_colours());
-    keep(&colours);
+    let colours = kept().unwrap_or_else(|| {
+        let read = Arc::new(read_desktop_colours());
+        keep(&read);
+        read
+    });
     #[cfg(target_os = "linux")]
-    if colours.wants_portal_accent() {
+    if colours.wants_portal_accent() && !PORTAL_ASKED.swap(true, Ordering::Relaxed) {
         ask_the_portal_for_an_accent(&colours, overlay, cx);
     }
     #[cfg(not(target_os = "linux"))]
@@ -75,4 +82,23 @@ fn ask_the_portal_for_an_accent(colours: &Arc<DesktopColours>, overlay: &Entity<
         cx.update(|cx| overlay.update(cx, |_, cx| cx.notify()));
     })
     .detach();
+}
+
+/// Read the config and the colour files ahead of the first capture, so opening the overlay
+/// does no disk work. The daemon calls this at start-up, off the UI thread.
+pub fn read_ahead() {
+    if kept().is_none() {
+        keep(&Arc::new(read_desktop_colours()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reading_ahead_keeps_the_colours_for_the_first_overlay() {
+        read_ahead();
+        assert!(kept().is_some());
+    }
 }
