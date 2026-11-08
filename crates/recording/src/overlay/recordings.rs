@@ -77,11 +77,11 @@ impl Recordings {
     fn summary(&self) -> String {
         let settings = self.recording.record;
         let (format, resolution, fps) = (
-            settings.format.label(),
-            settings.resolution.label(),
-            settings.fps.label(),
+            settings.format.name(),
+            settings.resolution.name(),
+            settings.fps.name(),
         );
-        format!("{format} · {resolution} · {fps}")
+        format!("{format} · {resolution} · {fps} fps")
     }
 
     fn folder_label(&self) -> String {
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn the_record_button_summarises_format_resolution_and_rate() {
         let summary = Recordings::new(Recording::default()).summary();
-        assert_eq!(summary.matches(" · ").count(), 2);
+        assert_eq!(summary, "MP4 · AV1 · Native · Native fps");
     }
 
     #[test]
