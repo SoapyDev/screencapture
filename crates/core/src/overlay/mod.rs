@@ -1019,8 +1019,9 @@ impl Overlay {
         hovered: bool,
         cx: &mut Context<Self>,
     ) {
-        self.drawers.hover(index, part, hovered, Instant::now());
-        self.drawers_changed(cx);
+        if self.drawers.hover(index, part, hovered, Instant::now()) {
+            self.drawers_changed(cx);
+        }
     }
 
     /// Tab: open the drawers one after the other, pinned.

@@ -4,8 +4,8 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, Div, Entity, MouseButton, MouseDownEvent, Pixels,
-    SharedString, Stateful, Window, canvas, div, ease_in_out, prelude::*, px,
+    Animation, AnimationExt, AnyElement, App, Bounds, Div, Entity, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, SharedString, Window, canvas, div, ease_in_out, prelude::*, px,
 };
 
 use super::{
@@ -31,7 +31,7 @@ pub const ACTION_BAR_ROOM: f32 = 48.;
 const SLIDE_DISTANCE: f32 = 240.;
 
 /// How wide a drawer would like to be, and its room around the screen's edge.
-const DRAWER_WIDTH: i32 = 420;
+const DRAWER_WIDTH: i32 = 780;
 const DRAWER_HEIGHT: i32 = 160;
 
 /// What the action bar is drawn from.
@@ -93,14 +93,15 @@ impl ActionBar<'_> {
             .child(buttons.relative().left(px(shift.to_f32())))
     }
 
-    /// The feature's buttons, one over the other, each with its drawer.
+    /// The feature's round buttons, one over the other with a gap to see the screen through,
+    /// each with its drawer.
     fn buttons(&self, actions: Vec<Actions>, drawer_width: i32) -> Div {
         let cells = actions
             .into_iter()
             .enumerate()
             .filter(|(_, actions)| !actions.main.is_empty());
         let cells = cells.map(|(index, actions)| self.cell(index, actions, drawer_width));
-        super::panel().flex_col().items_stretch().children(cells)
+        div().flex().flex_col().gap_2().children(cells)
     }
 
     fn cell(&self, index: usize, actions: Actions, drawer_width: i32) -> Div {
@@ -109,29 +110,53 @@ impl ActionBar<'_> {
         let button = div()
             .id(("action", index))
             .on_hover(hovered)
-            .flex()
-            .flex_col()
-            .gap_1()
             .children(actions.main);
         let drawer = shown.then(|| self.drawer(index, actions.drawer, drawer_width));
         div().relative().child(button).children(drawer)
     }
 
-    /// The drawer, opening to the left of its button. It begins at the button's edge (padding,
-    /// not a gap) so crossing over never leaves it.
-    fn drawer(&self, index: usize, options: Vec<AnyElement>, width: i32) -> Stateful<Div> {
-        let hovered = self.hover_listener(index, Part::Drawer);
+    /// The drawer: a bar on the button's left, at its height, sliding out of it. Its options
+    /// stay in one row while they fit in `width`, then wrap. The room around the bar is not
+    /// part of it: only the bar itself catches the pointer.
+    fn drawer(&self, index: usize, options: Vec<AnyElement>, width: i32) -> Div {
         let overlay = self.overlay.clone();
         let pinned = move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
             overlay.update(cx, |overlay, cx| overlay.drawer_pressed(index, cx));
         };
-        let contents = super::panel().w(px(width.to_f32())).flex_wrap().children(options);
-        let beside = div().id(("drawer", index)).absolute().right_full().bottom_0();
-        beside
-            .pr(px(drawer::GAP.to_f32()))
-            .on_hover(hovered)
+        let options = options.into_iter().map(|option| div().flex_none().child(option));
+        let bar = super::panel()
+            .id(("drawer", index))
+            .rounded_full()
+            .px_2()
+            .max_w_full()
+            .flex_wrap();
+        let bar = bar
+            .on_hover(self.hover_listener(index, Part::Drawer))
+            .on_mouse_move(self.moved_listener(index))
             .on_mouse_down(MouseButton::Left, pinned)
-            .child(contents)
+            .children(options)
+            .with_animation(
+                ("drawer-in", index),
+                Animation::new(SLIDE).with_easing(ease_in_out),
+                |bar, delta| bar.opacity(delta).mr(px(-24. * (1. - delta))),
+            );
+        let place = div().absolute().right_full().bottom_0().w(px(width.to_f32()));
+        place
+            .pr(px(drawer::GAP.to_f32()))
+            .flex()
+            .justify_end()
+            .items_center()
+            .child(bar)
+    }
+
+    /// Moving over the bar says the pointer is on it, in case the enter was missed.
+    fn moved_listener(&self, index: usize) -> impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static {
+        let overlay = self.overlay.clone();
+        move |_, _, cx| {
+            overlay.update(cx, |overlay, cx| {
+                overlay.drawer_hover(index, Part::Drawer, true, cx);
+            });
+        }
     }
 
     fn hover_listener(&self, index: usize, part: Part) -> impl Fn(&bool, &mut Window, &mut App) + 'static {

@@ -70,21 +70,25 @@ impl Drawers {
         self.slots.get(index).map_or(Drawer::Closed, |slot| slot.state)
     }
 
-    /// The pointer entered or left `part` of button `index`.
-    pub fn hover(&mut self, index: usize, part: Part, hovered: bool, now: Instant) {
+    /// The pointer entered or left `part` of button `index`. `true` if anything changed.
+    pub fn hover(&mut self, index: usize, part: Part, hovered: bool, now: Instant) -> bool {
         let Some(slot) = self.slots.get_mut(index) else {
-            return;
+            return false;
         };
-        let was_over = slot.over();
+        let (was_over, was) = (slot.over(), slot.state);
         match part {
             Part::Button => slot.over_button = hovered,
             Part::Drawer => slot.over_drawer = hovered,
         }
-        match (was_over, slot.over()) {
-            (false, true) => self.send(index, Event::PointerEntered, now),
-            (true, false) => self.send(index, Event::PointerLeft, now),
-            _ => {}
+        let event = match (was_over, slot.over()) {
+            (false, true) => Some(Event::PointerEntered),
+            (true, false) => Some(Event::PointerLeft),
+            _ => None,
+        };
+        if let Some(event) = event {
+            self.send(index, event, now);
         }
+        event.is_some() || self.state(index) != was
     }
 
     /// An option of drawer `index` was pressed: it stays open.
@@ -115,7 +119,18 @@ impl Drawers {
     /// Time passed: dwell and linger may be over.
     pub fn tick(&mut self, now: Instant) {
         for index in 0..self.slots.len() {
+            self.keep_open_under_the_pointer(index);
             self.send(index, Event::Tick, now);
+        }
+    }
+
+    /// A drawer never closes with the pointer on it, whatever the events said.
+    fn keep_open_under_the_pointer(&mut self, index: usize) {
+        let Some(slot) = self.slots.get_mut(index) else {
+            return;
+        };
+        if slot.over() && matches!(slot.state, Drawer::Closing { .. }) {
+            slot.state = Drawer::Open;
         }
     }
 
@@ -253,6 +268,16 @@ mod tests {
         let mut drawers = Drawers::new([false]);
         drawers.toggle_next(Instant::now());
         assert_eq!(drawers.state(0), Drawer::Closed);
+    }
+
+    #[test]
+    fn a_drawer_closing_under_the_pointer_opens_again() {
+        let start = Instant::now();
+        let mut drawers = opened(start);
+        drawers.hover(0, Part::Drawer, true, start);
+        drawers.slots[0].state = Drawer::Closing { since: start };
+        drawers.tick(start + LINGER * 2);
+        assert_eq!(drawers.state(0), Drawer::Open);
     }
 
     #[test]

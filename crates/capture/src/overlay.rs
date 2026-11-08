@@ -95,8 +95,8 @@ impl Feature for Capturing {
 
     fn actions(&self, act: &Act, ctx: &Ctx) -> Actions {
         let (label, ready) = capture_label(ctx);
-        let summary = folder::shown(&self.screenshots.dir(None));
-        let capture = widgets::button_with_summary("capture", label, summary, ready);
+        let hint = format!("{label}  ·  {}", folder::shown(&self.screenshots.dir(None)));
+        let capture = widgets::round_button("capture", widgets::Glyph::Camera, hint, ready);
         let capture = capture.on_click(act.on(|me: &mut Self, ctx| me.save(ctx.selection.confirm())));
         let folder = widgets::button("folder", self.folder_label(), false);
         let folder = folder.on_click(act.on(|me: &mut Self, _| me.browse()));

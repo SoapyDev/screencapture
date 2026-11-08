@@ -1,6 +1,9 @@
 //! The overlay's look, shared by the features: buttons and colours.
 
-use gpui::{App, CursorStyle, Div, Entity, SharedString, Stateful, Window, div, prelude::*, rgba};
+use gpui::{
+    App, Context, CursorStyle, Div, Entity, Hsla, Render, SharedString, Stateful, Window, div, prelude::*,
+    px, rgba,
+};
 
 use super::{Overlay, theme};
 
@@ -26,19 +29,109 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, activ
         .child(label.into())
 }
 
-/// A button with a smaller line under its label: what it will do, without opening its drawer.
-pub fn button_with_summary(
+/// Diameter of the big round action buttons.
+const ROUND: f32 = 56.;
+
+/// The picture on a round button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
+    Camera,
+    RecordDot,
+}
+
+/// A big round button showing `glyph`; `active` (ready to act) fills it with the accent. Its
+/// `hint` names it for the pointer's rest, and for anyone who can't read the picture.
+pub fn round_button(
     id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    summary: impl Into<SharedString>,
+    glyph: Glyph,
+    hint: impl Into<SharedString>,
     active: bool,
 ) -> Stateful<Div> {
-    let summary = div().text_xs().opacity(0.7).child(summary.into());
-    button(id, label, active)
+    let theme = theme::current();
+    let (fill, ink) = if active {
+        (theme.accent, theme.on_accent)
+    } else {
+        (theme.surface, theme.on_surface)
+    };
+    let hint = hint.into();
+    div()
+        .id(id.into())
+        .occlude()
+        .size(px(ROUND))
+        .rounded_full()
         .flex()
-        .flex_col()
         .items_center()
-        .child(summary)
+        .justify_center()
+        .bg(fill)
+        .border_2()
+        .border_color(theme.border)
+        .hover(|d| d.border_color(theme.accent))
+        .cursor(CursorStyle::PointingHand)
+        .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
+        .child(picture(glyph, ink))
+}
+
+fn picture(glyph: Glyph, ink: Hsla) -> Div {
+    match glyph {
+        Glyph::Camera => camera(ink),
+        Glyph::RecordDot => div()
+            .size(px(24.))
+            .rounded_full()
+            .bg(theme::current().danger_fill),
+    }
+}
+
+/// A camera drawn from boxes: body, viewfinder bump and lens.
+fn camera(ink: Hsla) -> Div {
+    let body = div()
+        .absolute()
+        .top(px(5.))
+        .size(px(28.))
+        .h(px(21.))
+        .rounded_md()
+        .border_2()
+        .border_color(ink);
+    let bump = div()
+        .absolute()
+        .top(px(1.))
+        .left(px(9.))
+        .w(px(10.))
+        .h(px(5.))
+        .rounded_t_sm()
+        .bg(ink);
+    let lens = div()
+        .absolute()
+        .top(px(10.))
+        .left(px(9.))
+        .size(px(10.))
+        .rounded_full()
+        .border_2()
+        .border_color(ink);
+    div()
+        .relative()
+        .w(px(28.))
+        .h(px(26.))
+        .child(body)
+        .child(bump)
+        .child(lens)
+}
+
+/// The text shown when the pointer rests on a round button.
+struct Hint(SharedString);
+
+impl Render for Hint {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme::current();
+        let text = self.0.clone();
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(theme.surface)
+            .text_color(theme.on_surface)
+            .text_sm()
+            .child(text)
+    }
 }
 
 /// Click handler running `f` on the overlay.

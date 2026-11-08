@@ -158,7 +158,8 @@ impl Feature for Recordings {
 
     fn actions(&self, act: &Act, _: &Ctx) -> Actions {
         let start = act.on(|me: &mut Self, ctx| me.record(false, ctx.selection));
-        let record = widgets::button_with_summary("record", "● Record  V", self.summary(), false);
+        let hint = format!("Record  V  ·  {}", self.summary());
+        let record = widgets::round_button("record", widgets::Glyph::RecordDot, hint, false);
         let record = record.on_click(start);
         let videos = widgets::button("videos", SharedString::from(self.folder_label()), false);
         let videos = videos.on_click(act.on(|me: &mut Self, _| me.browse()));

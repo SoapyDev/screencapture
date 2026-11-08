@@ -13,7 +13,7 @@ pub const DWELL: Duration = Duration::from_millis(120);
 /// Time away from the button and the drawer before it closes.
 pub const LINGER: Duration = Duration::from_millis(300);
 /// Space between the button and its drawer.
-pub const GAP: i32 = 8;
+pub const GAP: i32 = 4;
 
 /// Whether the drawer is open, and why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
