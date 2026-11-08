@@ -120,7 +120,6 @@ impl Editing {
     /// Keys while typing in a text box. Returns whether the key was used (always, while
     /// typing: shortcuts must not fire mid-sentence).
     fn text_key(&mut self, keystroke: &Keystroke) -> bool {
-        use keys::TextEdit;
         if self.annotations.editing().is_none() {
             return false;
         }
@@ -131,19 +130,10 @@ impl Editing {
             platform: modifiers.platform,
         };
         let typed = keystroke.key_char.as_deref();
-        let annotations = &mut self.annotations;
-        match keys::text_edit(&keystroke.key, typed, mods) {
-            TextEdit::Done => annotations.stop_editing(),
-            TextEdit::Newline => annotations.type_text("\n"),
-            TextEdit::Backspace => annotations.backspace(),
-            TextEdit::DeleteWord => annotations.delete_word(),
-            TextEdit::Undo => {
-                annotations.stop_editing();
-                annotations.undo();
-            }
-            TextEdit::Type(text) => annotations.type_text(&text),
-            TextEdit::Swallow => {}
-        }
+        type_into(
+            &mut self.annotations,
+            keys::text_edit(&keystroke.key, typed, mods),
+        );
         true
     }
 
@@ -408,6 +398,23 @@ impl Feature for Editing {
     fn test_hook(&mut self, region: Rect) -> Option<Effect> {
         self.draw_for_tests(region);
         None
+    }
+}
+
+/// What a key does to the text box being typed in.
+fn type_into(annotations: &mut Annotations, edit: keys::TextEdit) {
+    use keys::TextEdit;
+    match edit {
+        TextEdit::Done => annotations.stop_editing(),
+        TextEdit::Newline => annotations.type_text("\n"),
+        TextEdit::Backspace => annotations.backspace(),
+        TextEdit::DeleteWord => annotations.delete_word(),
+        TextEdit::Undo => {
+            annotations.stop_editing();
+            annotations.undo();
+        }
+        TextEdit::Type(text) => annotations.type_text(&text),
+        TextEdit::Swallow => {}
     }
 }
 

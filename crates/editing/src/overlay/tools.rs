@@ -102,173 +102,205 @@ fn swatch(id: String, c: Color, selected: bool) -> Stateful<Div> {
         })
 }
 
+/// The drawing tools' row: tools, colours, text controls, width, undo and delete.
 pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
-    let mut row = panel();
-    for (i, tool) in Tool::ALL.into_iter().enumerate() {
-        let glyph = match tool {
-            Tool::Rectangle => "□",
-            Tool::Ellipse => "○",
-            Tool::Line => "╱",
-            Tool::Arrow => "↗",
-            Tool::Freehand => "✎",
-            Tool::Counter => "①",
-            Tool::Text => "T",
-            Tool::Redact => "▮",
-        };
-        row = row.child(
-            button(
-                format!("tool-{i}"),
-                format!("{glyph} {}", i + 1),
-                bar.tool == Some(tool),
-            )
-            .on_click(edit(act, move |e| e.toggle_tool(tool))),
-        );
-    }
-    row = row.child(separator());
-    for (i, &c) in bar.palette.iter().enumerate() {
-        row = row.child(
-            swatch(format!("color-{i}"), c, c == bar.color).on_click(edit(act, move |e| e.set_color(c))),
-        );
-    }
-    if let Some(c) = bar.custom.filter(|c| !bar.palette.contains(c)) {
-        row = row.child(
-            swatch("color-custom".into(), c, c == bar.color).on_click(edit(act, move |e| e.set_color(c))),
-        );
-    }
-    row = row
+    let delete = bar
+        .has_selection
+        .then(|| button("delete", "🗑 Del", false).on_click(edit(act, Editing::delete_selected)));
+    panel()
+        .children(tool_buttons(act, bar))
+        .child(separator())
+        .children(swatches(act, bar))
         .child(button("picker", "＋", bar.picker.is_some()).on_click(edit(act, Editing::toggle_picker)))
         .when(bar.text, |row| {
-            // Which colour the palette sets, and whether the box has a background.
-            row.child(separator())
-                .child(
-                    button("ink", "A text", bar.target == Target::Ink)
-                        .on_click(edit(act, |e| e.set_target(Target::Ink))),
-                )
-                .child(
-                    button("fill-target", "▇ fill", bar.target == Target::Fill)
-                        .on_click(edit(act, |e| e.set_target(Target::Fill))),
-                )
-                .child(
-                    button(
-                        "fill",
-                        if bar.fill.is_some() { "Fill on" } else { "Fill off" },
-                        bar.fill.is_some(),
-                    )
-                    .on_click(edit(act, Editing::toggle_fill)),
-                )
+            row.child(separator()).children(text_controls(act, bar))
         })
         .child(separator())
-        // Width (font size for text) stepper; the mouse wheel does the same.
-        .child(button("thinner", "−", false).on_click(edit(act, |e| e.step_width(-1.))))
-        .child(
-            div()
-                .w(px(44.))
-                .flex()
-                .justify_center()
-                .child(format!("{} px", bar.width)),
-        )
-        .child(button("thicker", "+", false).on_click(edit(act, |e| e.step_width(1.))))
+        .children(width_stepper(act, bar.width))
         .child(separator())
-        .child(button("undo", "↶", false).on_click(edit(act, Editing::undo)));
-    if bar.has_selection {
-        row = row.child(button("delete", "🗑 Del", false).on_click(edit(act, Editing::delete_selected)));
-    }
-    row
+        .child(button("undo", "↶", false).on_click(edit(act, Editing::undo)))
+        .children(delete)
 }
+
+/// One button per tool, with its key.
+fn tool_buttons(act: &Act, bar: &DrawBar) -> Vec<Stateful<Div>> {
+    let button_for = |(i, tool): (usize, Tool)| {
+        let label = format!("{} {}", glyph(tool), i + 1);
+        let picked = button(format!("tool-{i}"), label, bar.tool == Some(tool));
+        picked.on_click(edit(act, move |e| e.toggle_tool(tool)))
+    };
+    Tool::ALL.into_iter().enumerate().map(button_for).collect()
+}
+
+const fn glyph(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Rectangle => "□",
+        Tool::Ellipse => "○",
+        Tool::Line => "╱",
+        Tool::Arrow => "↗",
+        Tool::Freehand => "✎",
+        Tool::Counter => "①",
+        Tool::Text => "T",
+        Tool::Redact => "▮",
+    }
+}
+
+/// The palette's colours, and the custom one if it isn't among them.
+fn swatches(act: &Act, bar: &DrawBar) -> Vec<Stateful<Div>> {
+    let custom = bar.custom.filter(|c| !bar.palette.contains(c));
+    let ids = (0..bar.palette.len())
+        .map(|i| format!("color-{i}"))
+        .chain(["color-custom".into()]);
+    let colours = bar.palette.iter().copied().chain(custom);
+    let swatch_for =
+        |(id, c): (String, Color)| swatch(id, c, c == bar.color).on_click(edit(act, move |e| e.set_color(c)));
+    ids.zip(colours).map(swatch_for).collect()
+}
+
+/// Which colour the palette sets, and whether the box has a background.
+fn text_controls(act: &Act, bar: &DrawBar) -> [Stateful<Div>; 3] {
+    let filled = bar.fill.is_some();
+    let ink =
+        button("ink", "A text", bar.target == Target::Ink).on_click(edit(act, |e| e.set_target(Target::Ink)));
+    let fill = button("fill-target", "▇ fill", bar.target == Target::Fill);
+    let fill = fill.on_click(edit(act, |e| e.set_target(Target::Fill)));
+    let toggle = button("fill", if filled { "Fill on" } else { "Fill off" }, filled);
+    [ink, fill, toggle.on_click(edit(act, Editing::toggle_fill))]
+}
+
+/// Width (font size for text) stepper; the mouse wheel does the same.
+fn width_stepper(act: &Act, width: f32) -> [gpui::AnyElement; 3] {
+    let shown = div()
+        .w(px(44.))
+        .flex()
+        .justify_center()
+        .child(format!("{width} px"));
+    [
+        button("thinner", "−", false)
+            .on_click(edit(act, |e| e.step_width(-1.)))
+            .into_any_element(),
+        shown.into_any_element(),
+        button("thicker", "+", false)
+            .on_click(edit(act, |e| e.step_width(1.)))
+            .into_any_element(),
+    ]
+}
+
+/// Hues across the picker's strip.
+const HUES: usize = 36;
+const SATURATIONS: [f32; 10] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.];
+const VALUES: [f32; 6] = [1., 0.9, 0.78, 0.65, 0.5, 0.35];
 
 /// Hue strip and a saturation × brightness grid for that hue.
 pub fn picker(act: &Act, hue: f32, current: Color) -> Div {
-    const HUES: usize = 36;
-    const SATURATIONS: [f32; 10] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.];
-    const VALUES: [f32; 6] = [1., 0.9, 0.78, 0.65, 0.5, 0.35];
-    let mut hues = div().flex();
-    for i in 0..HUES {
-        let h = i as f32 * 360. / HUES as f32;
-        let chosen = (h - hue).abs() < 1.;
-        hues = hues.child(
-            div()
-                .id(SharedString::from(format!("hue-{i}")))
-                .w(px(9.))
-                .h(px(18.))
-                .cursor(CursorStyle::PointingHand)
-                .bg(color(annotate::hsv(h, 1., 1.)))
-                .when(chosen, |d| d.border_1().border_color(gpui::white()))
-                .on_click(edit(act, move |e| e.set_picker_hue(h))),
-        );
-    }
-    let mut grid = div().flex().flex_col();
-    for (r, v) in VALUES.into_iter().enumerate() {
-        let mut line = div().flex();
-        for (c, s) in SATURATIONS.into_iter().enumerate() {
-            let pick = annotate::hsv(hue, s, v);
-            line = line.child(
-                div()
-                    .id(SharedString::from(format!("sv-{r}-{c}")))
-                    .w(px(32.4))
-                    .h(px(18.))
-                    .cursor(CursorStyle::PointingHand)
-                    .bg(color(pick))
-                    .when(pick == current, |d| d.border_2().border_color(gpui::white()))
-                    .on_click(edit(act, move |e| e.pick_custom(pick))),
-            );
-        }
-        grid = grid.child(line);
-    }
+    let current_shown = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .child(div().size(px(14.)).rounded_sm().bg(color(current)))
+        .child(annotate::to_hex(current));
     panel()
         .flex_col()
         .items_start()
         .p_2()
-        .child(hues)
-        .child(grid)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .child(div().size(px(14.)).rounded_sm().bg(color(current)))
-                .child(annotate::to_hex(current)),
-        )
+        .child(hue_strip(act, hue))
+        .child(shade_grid(act, hue, current))
+        .child(current_shown)
+}
+
+/// Every hue; a click shows its shades.
+fn hue_strip(act: &Act, hue: f32) -> Div {
+    let cell = |i: usize| {
+        let h = i as f32 * 360. / HUES as f32;
+        div()
+            .id(SharedString::from(format!("hue-{i}")))
+            .w(px(9.))
+            .h(px(18.))
+            .cursor(CursorStyle::PointingHand)
+            .bg(color(annotate::hsv(h, 1., 1.)))
+            .when((h - hue).abs() < 1., |d| d.border_1().border_color(gpui::white()))
+            .on_click(edit(act, move |e| e.set_picker_hue(h)))
+    };
+    div().flex().children((0..HUES).map(cell))
+}
+
+/// `hue`'s shades: brightness down, saturation across; a click picks one.
+fn shade_grid(act: &Act, hue: f32, current: Color) -> Div {
+    let cell = |r: usize, c: usize, pick: Color| {
+        div()
+            .id(SharedString::from(format!("sv-{r}-{c}")))
+            .w(px(32.4))
+            .h(px(18.))
+            .cursor(CursorStyle::PointingHand)
+            .bg(color(pick))
+            .when(pick == current, |d| d.border_2().border_color(gpui::white()))
+            .on_click(edit(act, move |e| e.pick_custom(pick)))
+    };
+    let line = |(r, v): (usize, f32)| {
+        let shades = SATURATIONS.into_iter().enumerate();
+        div()
+            .flex()
+            .children(shades.map(|(c, s)| cell(r, c, annotate::hsv(hue, s, v))))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .children(VALUES.into_iter().enumerate().map(line))
 }
 
 /// Paint `shapes` (global coordinates) into a window whose top-left is `origin`. Text boxes are
 /// shown as images instead (see [`TextKey`]).
 pub fn paint_shapes(shapes: &[Shape], origin: (i32, i32), bounds: Bounds<Pixels>, window: &mut Window) {
-    use lyon::tessellation::{LineCap, LineJoin};
-    let to_local = |(x, y): annotate::Point| {
-        point(
-            bounds.origin.x + px(x - origin.0 as f32),
-            bounds.origin.y + px(y - origin.1 as f32),
-        )
-    };
+    let place = Place { origin, bounds };
     for shape in shapes {
         if shape.tool == Tool::Redact {
             let (l, t, r, b) = shape.bounds();
-            let quad = Bounds::new(to_local((l, t)), size(px(r - l), px(b - t)));
+            let quad = Bounds::new(place.at((l, t)), size(px(r - l), px(b - t)));
             window.paint_quad(gpui::fill(quad, color(annotate::REDACTED)));
         }
         for stroke in shape.strokes() {
             for line in &stroke.lines {
-                let Some((&first, rest)) = line.split_first() else {
-                    continue;
-                };
-                let options = StrokeOptions::default()
-                    .with_line_width(stroke.width)
-                    .with_line_cap(LineCap::Round)
-                    .with_line_join(LineJoin::Round);
-                let mut path = PathBuilder::stroke(px(stroke.width)).with_style(PathStyle::Stroke(options));
-                path.move_to(to_local(first));
-                if rest.is_empty() {
-                    // A dot: a zero-length segment would tessellate to nothing.
-                    path.line_to(to_local((first.0 + 0.01, first.1)));
-                }
-                for &p in rest {
-                    path.line_to(to_local(p));
-                }
-                if let Ok(path) = path.build() {
-                    window.paint_path(path, color(stroke.color));
-                }
+                paint_line(line, &stroke, place, window);
             }
         }
+    }
+}
+
+/// Where desktop points land in a window whose top-left is `origin`, painting in `bounds`.
+#[derive(Clone, Copy)]
+struct Place {
+    origin: (i32, i32),
+    bounds: Bounds<Pixels>,
+}
+
+impl Place {
+    fn at(self, (x, y): annotate::Point) -> gpui::Point<Pixels> {
+        let (left, top) = (x - self.origin.0 as f32, y - self.origin.1 as f32);
+        point(self.bounds.origin.x + px(left), self.bounds.origin.y + px(top))
+    }
+}
+
+/// One polyline of `stroke`, round-capped; a single point is a dot.
+fn paint_line(line: &[annotate::Point], stroke: &annotate::Stroke, place: Place, window: &mut Window) {
+    use lyon::tessellation::{LineCap, LineJoin};
+    let Some((&first, rest)) = line.split_first() else {
+        return;
+    };
+    let options = StrokeOptions::default()
+        .with_line_width(stroke.width)
+        .with_line_cap(LineCap::Round)
+        .with_line_join(LineJoin::Round);
+    let mut path = PathBuilder::stroke(px(stroke.width)).with_style(PathStyle::Stroke(options));
+    path.move_to(place.at(first));
+    if rest.is_empty() {
+        // A dot: a zero-length segment would tessellate to nothing.
+        path.line_to(place.at((first.0 + 0.01, first.1)));
+    }
+    for &p in rest {
+        path.line_to(place.at(p));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color(stroke.color));
     }
 }

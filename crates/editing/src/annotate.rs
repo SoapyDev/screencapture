@@ -128,6 +128,39 @@ pub struct Shape {
     pub fill: Option<Color>,
 }
 
+/// The outline of the box with corners `a` and `b`.
+fn rectangle(a: Point, b: Point) -> Vec<Point> {
+    let (l, t, r, bottom) = (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
+    vec![(l, t), (r, t), (r, bottom), (l, bottom), (l, t)]
+}
+
+/// A line from `a` to `b` with a head at `b` sized for `width`.
+fn arrow(a: Point, b: Point, width: f32) -> Vec<Vec<Point>> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy);
+    if len < f32::EPSILON {
+        return vec![vec![a, b]];
+    }
+    let head = 4.0_f32.mul_add(width, 6.).min(len);
+    let (ux, uy) = (dx / len, dy / len);
+    let (sin, cos) = 28.0_f32.to_radians().sin_cos();
+    let barb = |side: f32| {
+        // Unit vector rotated by ±28°, pointing back from the tip.
+        let (rx, ry) = (
+            (side * uy).mul_add(-sin, ux * cos),
+            f32::mul_add(uy, cos, side * ux * sin),
+        );
+        (head.mul_add(-rx, b.0), head.mul_add(-ry, b.1))
+    };
+    vec![vec![a, b], vec![barb(1.), b, barb(-1.)]]
+}
+
+/// The segments of a polyline; a single point is a segment of no length.
+fn segments(line: &[Point]) -> impl Iterator<Item = (Point, Point)> + '_ {
+    let dot = (line.len() == 1).then(|| (line[0], line[0]));
+    line.windows(2).map(|pair| (pair[0], pair[1])).chain(dot)
+}
+
 /// Lines stroked together in one colour and width (round caps and joins). A one-point line is
 /// a dot, which is how filled discs are drawn.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,34 +183,13 @@ impl Shape {
             Tool::Counter | Tool::Text | Tool::Redact => Vec::new(),
             Tool::Freehand => vec![self.points.clone()],
             Tool::Line => vec![vec![a, b]],
-            Tool::Rectangle => {
-                let (l, t, r, bt) = (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
-                vec![vec![(l, t), (r, t), (r, bt), (l, bt), (l, t)]]
-            }
+            Tool::Rectangle => vec![rectangle(a, b)],
             Tool::Ellipse => {
                 let (cx, cy) = (f32::midpoint(a.0, b.0), f32::midpoint(a.1, b.1));
                 let (rx, ry) = ((a.0 - b.0).abs() / 2., (a.1 - b.1).abs() / 2.);
                 vec![ellipse((cx, cy), rx, ry)]
             }
-            Tool::Arrow => {
-                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                let len = dx.hypot(dy);
-                if len < f32::EPSILON {
-                    return vec![vec![a, b]];
-                }
-                let head = 4.0_f32.mul_add(self.width, 6.).min(len);
-                let (ux, uy) = (dx / len, dy / len);
-                let (sin, cos) = 28.0_f32.to_radians().sin_cos();
-                let barb = |side: f32| {
-                    // Unit vector rotated by ±28°, pointing back from the tip.
-                    let (rx, ry) = (
-                        (side * uy).mul_add(-sin, ux * cos),
-                        f32::mul_add(uy, cos, side * ux * sin),
-                    );
-                    (head.mul_add(-rx, b.0), head.mul_add(-ry, b.1))
-                };
-                vec![vec![a, b], vec![barb(1.), b, barb(-1.)]]
-            }
+            Tool::Arrow => arrow(a, b, self.width),
         }
     }
 
@@ -201,48 +213,51 @@ impl Shape {
                 color: self.color,
             }];
         }
+        self.counter_strokes()
+    }
+
+    /// A counter: a disc in its colour, its number in white on it.
+    fn counter_strokes(&self) -> Vec<Stroke> {
         let Some(&centre) = self.points.first() else {
             return Vec::new();
         };
         let r = self.radius();
         let (lines, width) = number_strokes(self.number, centre, r);
-        vec![
-            Stroke {
-                lines: vec![vec![centre]],
-                width: r * 2.,
-                color: self.color,
-            },
-            Stroke {
-                lines,
-                width,
-                color: [0xFF; 4],
-            },
-        ]
+        let disc = Stroke {
+            lines: vec![vec![centre]],
+            width: r * 2.,
+            color: self.color,
+        };
+        let number = Stroke {
+            lines,
+            width,
+            color: [0xFF; 4],
+        };
+        vec![disc, number]
     }
 
     /// Distance from `p` to the drawn shape's centre line (0 inside a counter's disc).
     pub fn distance(&self, p: Point) -> f32 {
         if self.tool == Tool::Counter {
-            return self
-                .points
-                .first()
-                .map_or(f32::MAX, |&c| (dist(p, c) - self.radius()).max(0.));
+            let centre = self.points.first();
+            return centre.map_or(f32::MAX, |&c| (dist(p, c) - self.radius()).max(0.));
         }
         if self.tool.is_box() {
-            let (l, t, r, b) = self.bounds();
-            return (l - p.0)
-                .max(p.0 - r)
-                .max(0.)
-                .hypot((t - p.1).max(p.1 - b).max(0.));
+            return self.box_distance(p);
         }
-        self.polylines()
-            .iter()
-            .flat_map(|line| {
-                let dot = (line.len() == 1).then(|| (line[0], line[0]));
-                line.windows(2).map(|s| (s[0], s[1])).chain(dot)
-            })
+        let lines = self.polylines();
+        let segments = lines.iter().flat_map(|line| segments(line));
+        segments
             .map(|(a, b)| segment_distance(p, a, b))
             .fold(f32::MAX, f32::min)
+    }
+
+    /// Distance from `p` to a text or redaction box (0 inside).
+    fn box_distance(&self, p: Point) -> f32 {
+        let (l, t, r, b) = self.bounds();
+        let across = (l - p.0).max(p.0 - r).max(0.);
+        let down = (t - p.1).max(p.1 - b).max(0.);
+        across.hypot(down)
     }
 
     /// Points that can be dragged to reshape: line/arrow ends, box corners (rectangle, ellipse,
@@ -269,24 +284,30 @@ impl Shape {
             Tool::Rectangle | Tool::Ellipse | Tool::Text | Tool::Redact => {
                 shape.points = vec![self.handles()[(i + 2) % 4], p];
             }
-            Tool::Freehand => {
-                // Scale about the opposite corner so it stays put.
-                let corners = self.handles();
-                let (o, c) = (corners[(i + 2) % 4], corners[i]);
-                let factor = |to: f32, from: f32, fixed: f32| {
-                    if (from - fixed).abs() < f32::EPSILON {
-                        1.
-                    } else {
-                        (to - fixed) / (from - fixed)
-                    }
-                };
-                let (fx, fy) = (factor(p.0, c.0, o.0), factor(p.1, c.1, o.1));
-                for q in &mut shape.points {
-                    *q = ((q.0 - o.0).mul_add(fx, o.0), (q.1 - o.1).mul_add(fy, o.1));
-                }
-            }
+            Tool::Freehand => shape.points = self.scaled_to_handle(i, p),
         }
         shape
+    }
+
+    /// The points scaled so handle `i` lands on `p`, about the opposite corner, which stays put.
+    fn scaled_to_handle(&self, i: usize, p: Point) -> Vec<Point> {
+        let corners = self.handles();
+        let (fixed, moved) = (corners[(i + 2) % 4], corners[i]);
+        let factor = |to: f32, from: f32, still: f32| {
+            if (from - still).abs() < f32::EPSILON {
+                1.
+            } else {
+                (to - still) / (from - still)
+            }
+        };
+        let (fx, fy) = (factor(p.0, moved.0, fixed.0), factor(p.1, moved.1, fixed.1));
+        let scale = |q: &Point| {
+            (
+                (q.0 - fixed.0).mul_add(fx, fixed.0),
+                (q.1 - fixed.1).mul_add(fy, fixed.1),
+            )
+        };
+        self.points.iter().map(scale).collect()
     }
 
     /// Bounding box (left, top, right, bottom) of the points.
@@ -305,6 +326,27 @@ impl Shape {
     }
 }
 
+/// The shape being drawn, as the button goes up. A click with a two-point tool is a slip, not
+/// a shape; with the Text tool, a box of the default size.
+fn finished(mut shape: Shape) -> Option<Shape> {
+    let tiny = match shape.points[..] {
+        [a, b] => (a.0 - b.0).abs() < 2. && (a.1 - b.1).abs() < 2.,
+        _ => false,
+    };
+    if !tiny {
+        return Some(shape);
+    }
+    if shape.tool != Tool::Text {
+        return None;
+    }
+    let a = shape.points[0];
+    let height = shape
+        .width
+        .mul_add(crate::text::LINE_HEIGHT, 2. * shape.width * crate::text::PADDING);
+    shape.points = vec![a, (a.0 + DEFAULT_TEXT_BOX, a.1 + height)];
+    Some(shape)
+}
+
 fn dist(a: Point, b: Point) -> f32 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
@@ -317,101 +359,109 @@ fn bounds(points: &[Point]) -> (f32, f32, f32, f32) {
     )
 }
 
+const TWO: &[Point] = &[
+    (0.05, 0.25),
+    (0.2, 0.06),
+    (0.5, 0.),
+    (0.8, 0.06),
+    (0.95, 0.27),
+    (0.85, 0.48),
+    (0.05, 1.),
+    (1., 1.),
+];
+const THREE: &[Point] = &[
+    (0.05, 0.1),
+    (0.35, 0.),
+    (0.7, 0.02),
+    (0.92, 0.2),
+    (0.85, 0.4),
+    (0.45, 0.48),
+    (0.85, 0.56),
+    (0.97, 0.76),
+    (0.8, 0.96),
+    (0.45, 1.),
+    (0.05, 0.9),
+];
+const FIVE: &[Point] = &[
+    (0.9, 0.),
+    (0.15, 0.),
+    (0.08, 0.45),
+    (0.45, 0.38),
+    (0.8, 0.46),
+    (0.97, 0.7),
+    (0.85, 0.92),
+    (0.5, 1.),
+    (0.05, 0.9),
+];
+const SIX: &[Point] = &[
+    (0.85, 0.04),
+    (0.55, 0.),
+    (0.25, 0.12),
+    (0.05, 0.45),
+    (0.05, 0.75),
+    (0.25, 0.98),
+    (0.6, 1.),
+    (0.9, 0.85),
+    (0.95, 0.62),
+    (0.75, 0.45),
+    (0.45, 0.42),
+    (0.15, 0.55),
+];
+
 /// Stroke-font digits in a unit box (x and y in 0..=1, y down), so the number looks the same
 /// on screen and in the file without a font rasteriser.
 fn digit(d: u32) -> Vec<Vec<Point>> {
-    let poly = |pts: &[Point]| pts.to_vec();
     match d {
         0 => vec![ellipse((0.5, 0.5), 0.5, 0.5)],
-        1 => vec![poly(&[(0.2, 0.25), (0.6, 0.), (0.6, 1.)])],
-        2 => vec![poly(&[
-            (0.05, 0.25),
-            (0.2, 0.06),
-            (0.5, 0.),
-            (0.8, 0.06),
-            (0.95, 0.27),
-            (0.85, 0.48),
-            (0.05, 1.),
-            (1., 1.),
-        ])],
-        3 => vec![poly(&[
-            (0.05, 0.1),
-            (0.35, 0.),
-            (0.7, 0.02),
-            (0.92, 0.2),
-            (0.85, 0.4),
-            (0.45, 0.48),
-            (0.85, 0.56),
-            (0.97, 0.76),
-            (0.8, 0.96),
-            (0.45, 1.),
-            (0.05, 0.9),
-        ])],
-        4 => vec![poly(&[(0.75, 1.), (0.75, 0.), (0., 0.7), (1., 0.7)])],
-        5 => vec![poly(&[
-            (0.9, 0.),
-            (0.15, 0.),
-            (0.08, 0.45),
-            (0.45, 0.38),
-            (0.8, 0.46),
-            (0.97, 0.7),
-            (0.85, 0.92),
-            (0.5, 1.),
-            (0.05, 0.9),
-        ])],
-        6 => vec![poly(&[
-            (0.85, 0.04),
-            (0.55, 0.),
-            (0.25, 0.12),
-            (0.05, 0.45),
-            (0.05, 0.75),
-            (0.25, 0.98),
-            (0.6, 1.),
-            (0.9, 0.85),
-            (0.95, 0.62),
-            (0.75, 0.45),
-            (0.45, 0.42),
-            (0.15, 0.55),
-        ])],
-        7 => vec![poly(&[(0., 0.), (1., 0.), (0.35, 1.)])],
+        1 => vec![vec![(0.2, 0.25), (0.6, 0.), (0.6, 1.)]],
+        2 => vec![TWO.to_vec()],
+        3 => vec![THREE.to_vec()],
+        4 => vec![vec![(0.75, 1.), (0.75, 0.), (0., 0.7), (1., 0.7)]],
+        5 => vec![FIVE.to_vec()],
+        6 => vec![SIX.to_vec()],
+        7 => vec![vec![(0., 0.), (1., 0.), (0.35, 1.)]],
         8 => vec![ellipse((0.5, 0.25), 0.4, 0.25), ellipse((0.5, 0.73), 0.5, 0.27)],
-        _ => digit(6)
-            .into_iter()
-            .map(|l| l.into_iter().map(|(x, y)| (1. - x, 1. - y)).collect())
-            .collect(),
+        // A nine is a six turned half a turn.
+        _ => vec![SIX.iter().map(|&(x, y)| (1. - x, 1. - y)).collect()],
     }
 }
+
+/// Digit width / height.
+const DIGIT_ASPECT: f32 = 0.6;
+/// Between digits, in heights.
+const DIGIT_GAP: f32 = 0.2;
 
 /// The number's strokes centred on `centre`, sized to sit inside a disc of radius `r`; returns
 /// them with their stroke width.
 fn number_strokes(number: u32, centre: Point, r: f32) -> (Vec<Vec<Point>>, f32) {
-    const ASPECT: f32 = 0.6; // digit width / height
-    const GAP: f32 = 0.2; // between digits, in heights
     let digits: Vec<u32> = number
         .to_string()
         .chars()
         .filter_map(|c| c.to_digit(10))
         .collect();
     let n = digits.len() as f32;
-    let total = n.mul_add(ASPECT, (n - 1.) * GAP); // in heights
+    let total = n.mul_add(DIGIT_ASPECT, (n - 1.) * DIGIT_GAP); // in heights
     // As tall as looks right, but with the corners (plus the stroke) inside the disc.
     let height = (0.9 * r).min(0.86 * r / (total / 2.).hypot(0.5));
-    let width = height * 0.2;
-    let left = total.mul_add(-height / 2., centre.0);
-    let top = centre.1 - height / 2.;
-    let lines = digits
-        .iter()
-        .enumerate()
-        .flat_map(|(i, &d)| {
-            let x0 = (i as f32 * (ASPECT + GAP)).mul_add(height, left);
-            digit(d).into_iter().map(move |line| {
-                line.into_iter()
-                    .map(|(x, y)| ((x * ASPECT).mul_add(height, x0), y.mul_add(height, top)))
-                    .collect()
-            })
-        })
-        .collect();
-    (lines, width)
+    let corner = (total.mul_add(-height / 2., centre.0), centre.1 - height / 2.);
+    let placed = digits.iter().enumerate().flat_map(|(i, &d)| {
+        let left = (i as f32 * (DIGIT_ASPECT + DIGIT_GAP)).mul_add(height, corner.0);
+        placed_digit(d, (left, corner.1), height)
+    });
+    (placed.collect(), height * 0.2)
+}
+
+/// Digit `d`'s strokes with its top-left at `corner`, `height` tall.
+fn placed_digit(d: u32, corner: Point, height: f32) -> impl Iterator<Item = Vec<Point>> {
+    let place = move |(x, y): Point| {
+        (
+            (x * DIGIT_ASPECT).mul_add(height, corner.0),
+            y.mul_add(height, corner.1),
+        )
+    };
+    digit(d)
+        .into_iter()
+        .map(move |line| line.into_iter().map(place).collect())
 }
 
 /// Closed ring through `n` points; about one segment per 4 px keeps it smooth.
@@ -501,25 +551,36 @@ impl Annotations {
     pub fn press(&mut self, p: Point) -> bool {
         self.stop_editing();
         if let Some(grab) = self.grab_at(p) {
-            let index = match grab {
-                Grab::Handle(_) => self.selected.unwrap_or_default(),
-                Grab::Shape(i) => i,
-            };
-            self.selected = Some(index);
-            let origin = self.shapes[index].clone();
-            self.edit = Some(match grab {
-                Grab::Handle(handle) => Edit::Handle {
-                    index: handle,
-                    start: p,
-                    origin,
-                },
-                Grab::Shape(_) => Edit::Move { start: p, origin },
-            });
-            self.checkpoint();
+            self.grab(grab, p);
             return true;
         }
         self.selected = None;
         let Some(tool) = self.tool else { return false };
+        self.current = Some(self.new_shape(tool, p));
+        true
+    }
+
+    /// Start moving the shape (or dragging the handle) under `p`.
+    fn grab(&mut self, grab: Grab, p: Point) {
+        let index = match grab {
+            Grab::Handle(_) => self.selected.unwrap_or_default(),
+            Grab::Shape(i) => i,
+        };
+        self.selected = Some(index);
+        let origin = self.shapes[index].clone();
+        self.edit = Some(match grab {
+            Grab::Handle(handle) => Edit::Handle {
+                index: handle,
+                start: p,
+                origin,
+            },
+            Grab::Shape(_) => Edit::Move { start: p, origin },
+        });
+        self.checkpoint();
+    }
+
+    /// A shape of `tool` begun at `p`, in the current colour and width.
+    fn new_shape(&self, tool: Tool, p: Point) -> Shape {
         let mut shape = Shape {
             tool,
             points: vec![p, p],
@@ -537,8 +598,7 @@ impl Annotations {
             Tool::Redact => shape.color = REDACTED,
             _ => {}
         }
-        self.current = Some(shape);
-        true
+        shape
     }
 
     pub fn motion(&mut self, p: Point) {
@@ -567,24 +627,9 @@ impl Annotations {
             // Only selected: nothing to undo.
             self.history.pop();
         }
-        let Some(mut shape) = self.current.take() else {
+        let Some(shape) = self.current.take().and_then(finished) else {
             return;
         };
-        // A click with a two-point tool is a slip, not a shape; with the Text tool, a box of the
-        // default size.
-        let tiny = match shape.points[..] {
-            [a, b] => (a.0 - b.0).abs() < 2. && (a.1 - b.1).abs() < 2.,
-            _ => false,
-        };
-        if tiny && shape.tool == Tool::Text {
-            let a = shape.points[0];
-            let h = shape
-                .width
-                .mul_add(crate::text::LINE_HEIGHT, 2. * shape.width * crate::text::PADDING);
-            shape.points = vec![a, (a.0 + DEFAULT_TEXT_BOX, a.1 + h)];
-        } else if tiny {
-            return;
-        }
         let text = shape.tool == Tool::Text;
         self.checkpoint();
         self.shapes.push(shape);
@@ -852,7 +897,6 @@ pub fn rasterize_clipped(image: &mut RgbaImage, shapes: &[Shape], origin: Point,
         clip[2].min(image.width()),
         clip[3].min(image.height()),
     ];
-    let to_pixels = |(x, y): Point| ((x - origin.0) * scale, (y - origin.1) * scale);
     for shape in shapes {
         match shape.tool {
             Tool::Redact => redact(image, shape, origin, scale, clip),
@@ -860,11 +904,7 @@ pub fn rasterize_clipped(image: &mut RgbaImage, shapes: &[Shape], origin: Point,
             _ => {}
         }
         for group in shape.strokes() {
-            let lines: Vec<Vec<Point>> = group
-                .lines
-                .into_iter()
-                .map(|l| l.into_iter().map(to_pixels).collect())
-                .collect();
+            let lines = in_pixels(group.lines, origin, scale);
             stroke(image, &lines, group.width * scale / 2., group.color, clip);
         }
     }
@@ -928,35 +968,65 @@ fn pixel_box(points: impl Iterator<Item = Point>, pad: f32, clip: [u32; 4]) -> O
 /// translucent stroke crossing itself doesn't get darker.
 fn stroke(image: &mut RgbaImage, lines: &[Vec<Point>], half: f32, color: Color, size: [u32; 4]) {
     let pad = half + 1.;
-    let Some([bx0, by0, bx1, by1]) = pixel_box(lines.iter().flatten().copied(), pad, size) else {
+    let Some(area) = pixel_box(lines.iter().flatten().copied(), pad, size) else {
         return;
     };
-    let bw = (bx1 - bx0) as usize;
-    let mut mask = vec![0_f32; bw * (by1 - by0) as usize];
-    for line in lines {
-        let segments = line.windows(2).map(|s| (s[0], s[1]));
-        let dot = (line.len() == 1).then(|| (line[0], line[0]));
-        for (a, b) in segments.chain(dot) {
-            let Some([x0, y0, x1, y1]) = pixel_box([a, b].into_iter(), pad, size) else {
-                continue;
-            };
-            for py in y0.max(by0)..y1.min(by1) {
-                for px in x0.max(bx0)..x1.min(bx1) {
-                    let d = segment_distance((px as f32 + 0.5, py as f32 + 0.5), a, b);
-                    let coverage = (half + 0.5 - d).clamp(0., 1.);
-                    let m = &mut mask[(py - by0) as usize * bw + (px - bx0) as usize];
-                    *m = m.max(coverage);
-                }
+    let mut mask = Mask::over(area);
+    for (a, b) in lines.iter().flat_map(|line| segments(line)) {
+        if let Some(near) = pixel_box([a, b].into_iter(), pad, size) {
+            mask.cover(near, |px, py| {
+                (half + 0.5 - segment_distance((px + 0.5, py + 0.5), a, b)).clamp(0., 1.)
+            });
+        }
+    }
+    mask.blend_into(image, color);
+}
+
+/// How much of each pixel of an area a stroke covers (0..=1).
+struct Mask {
+    /// Left, top, right, bottom, in image pixels.
+    area: [u32; 4],
+    coverage: Vec<f32>,
+}
+
+impl Mask {
+    fn over(area: [u32; 4]) -> Self {
+        let [left, top, right, bottom] = area;
+        let coverage = vec![0_f32; (right - left) as usize * (bottom - top) as usize];
+        Self { area, coverage }
+    }
+
+    /// Raise the pixels of `near` (within the area) to what `covered` says of them.
+    fn cover(&mut self, near: [u32; 4], covered: impl Fn(f32, f32) -> f32) {
+        let [left, top, right, bottom] = self.area;
+        let width = (right - left) as usize;
+        for py in near[1].max(top)..near[3].min(bottom) {
+            for px in near[0].max(left)..near[2].min(right) {
+                let kept = &mut self.coverage[(py - top) as usize * width + (px - left) as usize];
+                *kept = kept.max(covered(px as f32, py as f32));
             }
         }
     }
-    for (i, &coverage) in mask.iter().enumerate() {
-        if coverage > 0. {
-            let (px, py) = (bx0 + (i % bw) as u32, by0 + (i / bw) as u32);
-            let dst = &mut image.get_pixel_mut(px, py).0;
-            *dst = blend(*dst, color, coverage);
+
+    /// Paint `color` into `image` as covered.
+    fn blend_into(&self, image: &mut RgbaImage, color: Color) {
+        let [left, top, right, _] = self.area;
+        let width = (right - left) as usize;
+        for (i, &coverage) in self.coverage.iter().enumerate().filter(|(_, c)| **c > 0.) {
+            let (px, py) = (left + (i % width) as u32, top + (i / width) as u32);
+            let pixel = &mut image.get_pixel_mut(px, py).0;
+            *pixel = blend(*pixel, color, coverage);
         }
     }
+}
+
+/// `lines` (desktop points) in image pixels, for an image whose top-left is `origin`.
+fn in_pixels(lines: Vec<Vec<Point>>, origin: Point, scale: f32) -> Vec<Vec<Point>> {
+    let to_pixels = |(x, y): Point| ((x - origin.0) * scale, (y - origin.1) * scale);
+    lines
+        .into_iter()
+        .map(|line| line.into_iter().map(to_pixels).collect())
+        .collect()
 }
 
 fn segment_distance(p: Point, a: Point, b: Point) -> f32 {

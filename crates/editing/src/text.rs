@@ -68,25 +68,24 @@ pub fn render(text: &str, size: f32, color: Color, fill: Option<Color>, w: u32, 
     let mut buffer = layout(system, text, size, w);
     let pad = (size * PADDING).round() as i32;
     let [r, g, b, a] = color;
-    buffer.draw(
-        system,
-        cache,
-        cosmic_text::Color::rgba(r, g, b, a),
-        |x, y, gw, gh, c| {
-            for py in y..y + gh as i32 {
-                for px in x..x + gw as i32 {
-                    let (ix, iy) = (px + pad, py + pad);
-                    if ix < 0 || iy < 0 || ix >= image.width() as i32 || iy >= image.height() as i32 {
-                        continue;
-                    }
-                    let dst = &mut image.get_pixel_mut(ix as u32, iy as u32).0;
-                    *dst = blend(*dst, [c.r(), c.g(), c.b(), 255], f32::from(c.a()) / 255.);
-                }
-            }
-        },
-    );
+    let ink = cosmic_text::Color::rgba(r, g, b, a);
+    buffer.draw(system, cache, ink, |x, y, w, h, c| {
+        let shade = ([c.r(), c.g(), c.b(), 255], f32::from(c.a()) / 255.);
+        fill_rect(&mut image, (x + pad, y + pad, w, h), shade);
+    });
     drop(guard);
     image
+}
+
+/// Blend `(colour, coverage)` over the `(x, y, w, h)` rectangle of `image`, clipped to it.
+fn fill_rect(image: &mut RgbaImage, (x, y, w, h): (i32, i32, u32, u32), (colour, coverage): (Color, f32)) {
+    let (width, height) = (image.width() as i32, image.height() as i32);
+    for py in y.max(0)..(y + h as i32).min(height) {
+        for px in x.max(0)..(x + w as i32).min(width) {
+            let pixel = &mut image.get_pixel_mut(px as u32, py as u32).0;
+            *pixel = blend(*pixel, colour, coverage);
+        }
+    }
 }
 
 /// Caret after the last character, as (x, y, height) in pixels from the box's top-left.
