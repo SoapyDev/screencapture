@@ -444,7 +444,14 @@ fn run_test_hooks(overlay: &Entity<Overlay>, cx: &App) {
     .detach();
 }
 
+/// Paint the bars in the desktop's light or dark, from now on.
+fn follow_desktop_scheme(cx: &App) {
+    let scheme = theme::Scheme::from(cx.window_appearance());
+    theme::set_current(theme::ChromeTheme::built_in(scheme));
+}
+
 fn open_windows(overlay: &Entity<Overlay>, cx: &mut App) {
+    follow_desktop_scheme(cx);
     let mut displays = displays_by_pointer(overlay.read(cx), cx).into_iter();
     // Open the first synchronously, the rest after yielding to the event loop, so the compositor
     // can configure and show the first surface without waiting for the others (~15 ms each).
@@ -1171,7 +1178,7 @@ pub fn rect_div(r: Rect) -> Div {
 #[must_use]
 pub fn handle_div(x: i32, y: i32) -> Div {
     rect_div(Rect::new(x - HANDLE / 2, y - HANDLE / 2, HANDLE, HANDLE))
-        .bg(theme::current().handle_fill)
+        .bg(theme::current().marks.handle_fill)
         .border_1()
         .border_color(theme::current().accent)
 }
@@ -1323,9 +1330,9 @@ fn size_label(selected: Rect, shown: Rect, screen_height: i32) -> Div {
         .top(px(top.to_f32()))
         .px_2()
         .rounded_sm()
-        .bg(theme::current().scrim)
+        .bg(theme::current().marks.scrim)
         .text_xs()
-        .text_color(theme::current().on_scrim)
+        .text_color(theme::current().marks.on_scrim)
         .child(format!("{} × {}", selected.w, selected.h))
 }
 
@@ -1335,7 +1342,7 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
     let border = if picked {
         theme.accent
     } else if hovered {
-        theme.screen_hover_outline
+        theme.marks.screen_hover_outline
     } else {
         hsla(0., 0., 0., 0.)
     };
@@ -1343,10 +1350,10 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
         .px_4()
         .py_2()
         .rounded_lg()
-        .bg(theme.scrim_soft)
+        .bg(theme.marks.scrim_soft)
         .text_2xl()
         .font_weight(FontWeight::BOLD)
-        .text_color(theme.on_scrim)
+        .text_color(theme.marks.on_scrim)
         .child(format!("{}{}", if picked { "✓ " } else { "" }, monitor.name));
     let area = rect_div(local(monitor.rect, monitor.rect))
         .border_4()

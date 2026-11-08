@@ -51,9 +51,9 @@ fn notice_line(text: &SharedString) -> Div {
     div()
         .px_2()
         .rounded_sm()
-        .bg(theme::current().scrim)
+        .bg(theme::current().marks.scrim)
         .text_sm()
-        .text_color(theme::current().danger_text)
+        .text_color(theme::current().marks.danger_text)
         .child(text.clone())
 }
 
