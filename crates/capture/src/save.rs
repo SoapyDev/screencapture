@@ -11,6 +11,10 @@ use screencapture_core::config::Section;
 
 /// Encode `image` as PNG into `out`, and report errors up to the last byte (buffered writes
 /// included).
+///
+/// # Errors
+///
+/// When encoding fails, or `out` refuses a write.
 pub fn write_png(image: &RgbaImage, out: impl std::io::Write) -> Result<()> {
     use image::{
         ImageEncoder,
@@ -37,6 +41,10 @@ pub struct Saved {
 
 /// Encode `image` as PNG into `dir` (created if missing) under a timestamped name. If that name
 /// is taken, `_1`, `_2`, ... is appended; existing files are never overwritten.
+///
+/// # Errors
+///
+/// When encoding fails, or the folder or file can't be created or written.
 pub fn save_png(image: &RgbaImage, dir: &Path, time: DateTime<Local>) -> Result<Saved> {
     use std::io::Write;
 

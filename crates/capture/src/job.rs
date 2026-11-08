@@ -5,15 +5,28 @@ use std::path::Path;
 use anyhow::Result;
 use image::RgbaImage;
 
-use screencapture_core::{capture::Snapshot, drawings::Drawings, selection::Request};
+use screencapture_core::{
+    capture::Snapshot,
+    drawings::Drawings,
+    selection::Request,
+    units::{ToF32, saturating_u32},
+};
 
 /// Capture what `request` asks for. Only the monitors involved are copied.
+///
+/// # Errors
+///
+/// When the display server refuses the capture, or `request` names no screen there is.
 pub fn grab(request: &Request) -> Result<RgbaImage> {
     compose(&Snapshot::take_where(|m| request.needs(m))?, request, None)
 }
 
 /// The final image for an overlay selection: cut from the frozen `snapshot`, with any
 /// `drawings` burnt in at the output's pixel density.
+///
+/// # Errors
+///
+/// When the region touches no screen, or a named screen doesn't exist.
 pub fn compose<C: std::ops::Deref<Target = [u8]>>(
     snapshot: &Snapshot<C>,
     request: &Request,
@@ -27,21 +40,25 @@ pub fn compose<C: std::ops::Deref<Target = [u8]>>(
     };
     // Each screen's part of the drawing goes where that screen landed, cut at its edges.
     let (placements, scale) = snapshot.placements(request)?;
-    let px = |v: i32| (f64::from(v) * scale).round().max(0.) as u32;
+    let px = |v: i32| saturating_u32((f64::from(v) * scale).round());
     for p in placements {
-        let origin = ((p.src.x - p.dst.0) as f32, (p.src.y - p.dst.1) as f32);
+        let origin = ((p.src.x - p.dst.0).to_f32(), (p.src.y - p.dst.1).to_f32());
         let clip = [
             px(p.dst.0),
             px(p.dst.1),
             px(p.dst.0 + p.src.w),
             px(p.dst.1 + p.src.h),
         ];
-        drawings.rasterize(&mut image, origin, scale as f32, clip);
+        drawings.rasterize(&mut image, origin, scale.to_f32(), clip);
     }
     Ok(image)
 }
 
 /// Capture and save.
+///
+/// # Errors
+///
+/// When capturing fails, or the file can't be written.
 pub fn run(request: &Request, dir: &Path) -> Result<crate::save::Saved> {
     let image = grab(request)?;
     crate::save::save_png(&image, dir, chrono::Local::now())
@@ -70,7 +87,8 @@ mod tests {
     impl Fill {
         fn covers(&self, (x, y): (f32, f32)) -> bool {
             let inside = |r: &Rect| {
-                (r.x as f32..r.right() as f32).contains(&x) && (r.y as f32..(r.y + r.h) as f32).contains(&y)
+                (r.x.to_f32()..r.right().to_f32()).contains(&x)
+                    && (r.y.to_f32()..r.bottom().to_f32()).contains(&y)
             };
             self.0.iter().any(inside)
         }
@@ -80,7 +98,7 @@ mod tests {
         fn rasterize(&self, image: &mut RgbaImage, origin: (f32, f32), scale: f32, clip: [u32; 4]) {
             for py in clip[1]..clip[3].min(image.height()) {
                 for px in clip[0]..clip[2].min(image.width()) {
-                    let desktop = (px as f32 / scale + origin.0, py as f32 / scale + origin.1);
+                    let desktop = (px.to_f32() / scale + origin.0, py.to_f32() / scale + origin.1);
                     if self.covers(desktop) {
                         image.put_pixel(px, py, Rgba([255, 0, 0, 255]));
                     }
@@ -180,7 +198,7 @@ mod tests {
         let monitors = capture::monitors().unwrap();
         let width: i32 = monitors.iter().map(|m| m.rect.w).sum();
         let image = grab(&Request::Screens(Vec::new())).unwrap();
-        assert!(image.width() >= width as u32);
+        assert!(image.width() >= screencapture_core::units::unsigned(width));
     }
 
     #[test]
