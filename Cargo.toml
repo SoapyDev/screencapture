@@ -75,18 +75,25 @@ repository.workspace = true
 
 [dependencies]
 screencapture-core.workspace = true
-screencapture-editing.workspace = true
-screencapture-capture.workspace = true
-screencapture-recording.workspace = true
+screencapture-editing = { workspace = true, optional = true }
+screencapture-capture = { workspace = true, optional = true }
+screencapture-recording = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
 
 [features]
-default = ["wayland"]
+default = ["wayland", "capture", "editing", "recording"]
 # Wayland: gpui's Wayland backend (layer-shell overlay) + native wlr-screencopy capture.
-wayland = ["screencapture-core/wayland", "screencapture-recording/wayland"]
+wayland = ["screencapture-core/wayland", "screencapture-recording?/wayland"]
 # X11: gpui's X11 backend + xcap capture.
 x11 = ["screencapture-core/x11"]
+# What the program can do; leave any out.
+# Screenshots: Enter in the overlay, and `region -g`, `screen NAMES`, `all`.
+capture = ["dep:screencapture-capture"]
+# Drawing over the screens before a screenshot or a recording.
+editing = ["dep:screencapture-editing"]
+# Screen recording: V in the overlay, and `record …`.
+recording = ["dep:screencapture-recording"]
 
 [lints]
 workspace = true
@@ -144,6 +151,11 @@ image.workspace = true
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 wayland-client.workspace = true
 wayland-protocols-wlr.workspace = true
+
+# The end-to-end suite drives every feature.
+[[test]]
+name = "e2e"
+required-features = ["wayland", "capture", "editing", "recording"]
 
 # Test driver: real pointer input for checking the overlay (see examples/drive.rs).
 [[example]]

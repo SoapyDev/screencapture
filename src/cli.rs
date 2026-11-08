@@ -5,11 +5,13 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::{
-    capture::Rect,
-    record::{command::Command as RecordCommand, plan::Target, settings::Overrides},
-    selection::{Mode, Request},
-};
+#[cfg(any(feature = "capture", feature = "recording"))]
+use crate::capture::Rect;
+#[cfg(feature = "recording")]
+use crate::record::{command::Command as RecordCommand, plan::Target, settings::Overrides};
+use crate::selection::Mode;
+#[cfg(feature = "capture")]
+use crate::selection::Request;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -28,17 +30,20 @@ pub enum Command {
     /// Select a region with the mouse (default), or capture the given geometry.
     Region {
         /// Region as "X,Y `WxH`" in logical desktop pixels (slurp format): no UI.
+        #[cfg(feature = "capture")]
         #[arg(short, long, value_parser = Rect::parse)]
         geometry: Option<Rect>,
     },
     /// Capture the named screens stitched into one image; with no names, click to pick.
     Screen { names: Vec<String> },
     /// Capture every screen stitched into one image, without any UI.
+    #[cfg(feature = "capture")]
     All,
     /// List screens and their geometry.
     List,
     /// Record a video: the focused screen, unless told otherwise. Runs until
     /// `screencapture record stop` (or Ctrl+C when no daemon runs).
+    #[cfg(feature = "recording")]
     Record {
         #[command(subcommand)]
         what: Option<RecordWhat>,
@@ -51,6 +56,7 @@ pub enum Command {
     Daemon,
 }
 
+#[cfg(feature = "recording")]
 #[derive(Subcommand, Debug)]
 pub enum RecordWhat {
     /// Every screen.
@@ -74,22 +80,28 @@ pub enum RecordWhat {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Plan {
     Overlay(Mode),
+    #[cfg(feature = "capture")]
     Capture(Request),
     List,
     Daemon,
+    #[cfg(feature = "recording")]
     Record(RecordCommand),
+    /// Something this build left out.
+    #[cfg(not(feature = "capture"))]
+    Missing(&'static str),
 }
 
 impl Cli {
     pub fn plan(&self) -> Plan {
         match &self.command {
-            None | Some(Command::Region { geometry: None }) => Plan::Overlay(Mode::Region),
-            Some(Command::Region { geometry: Some(rect) }) => Plan::Capture(Request::Region(*rect)),
-            Some(Command::Screen { names }) if names.is_empty() => Plan::Overlay(Mode::Screens),
-            Some(Command::Screen { names }) => Plan::Capture(Request::Screens(names.clone())),
+            None => Plan::Overlay(Mode::Region),
+            Some(command @ Command::Region { .. }) => region(command),
+            Some(Command::Screen { names }) => screens(names),
             // Empty list means "every screen", resolved once the monitors are known.
+            #[cfg(feature = "capture")]
             Some(Command::All) => Plan::Capture(Request::Screens(Vec::new())),
             Some(Command::List) => Plan::List,
+            #[cfg(feature = "recording")]
             Some(Command::Record { what, overrides }) => {
                 Plan::Record(record_command(what.as_ref(), *overrides))
             }
@@ -99,6 +111,32 @@ impl Cli {
     }
 }
 
+/// `region`: the overlay, or (`-g`) that region captured.
+const fn region(command: &Command) -> Plan {
+    #[cfg(feature = "capture")]
+    if let Command::Region { geometry: Some(rect) } = command {
+        return Plan::Capture(Request::Region(*rect));
+    }
+    let _ = command;
+    Plan::Overlay(Mode::Region)
+}
+
+/// `screen`: the overlay to pick some, or the named ones captured.
+#[cfg_attr(
+    not(feature = "capture"),
+    expect(clippy::missing_const_for_fn, reason = "capturing them is not const")
+)]
+fn screens(names: &[String]) -> Plan {
+    if names.is_empty() {
+        return Plan::Overlay(Mode::Screens);
+    }
+    #[cfg(feature = "capture")]
+    return Plan::Capture(Request::Screens(names.to_vec()));
+    #[cfg(not(feature = "capture"))]
+    Plan::Missing("screenshots")
+}
+
+#[cfg(feature = "recording")]
 fn record_command(what: Option<&RecordWhat>, overrides: Overrides) -> RecordCommand {
     let target = match what {
         None | Some(RecordWhat::Toggle) => Target::Focused,
@@ -132,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "capture")]
     fn geometry_captures_without_ui() {
         assert_eq!(
             plan(&["region", "-g", "10,20 300x400"]),
@@ -140,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "capture")]
     fn named_screens_capture_without_ui() {
         assert_eq!(
             plan(&["screen", "DP-1", "DP-2"]),
@@ -153,17 +193,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "capture")]
     fn all_and_list() {
         assert_eq!(plan(&["all"]), Plan::Capture(Request::Screens(Vec::new())));
         assert_eq!(plan(&["list"]), Plan::List);
     }
 
     #[test]
+    #[cfg(unix)]
     fn daemon_command() {
         assert_eq!(plan(&["daemon"]), Plan::Daemon);
     }
 
     #[test]
+    #[cfg(feature = "recording")]
     fn record_targets() {
         let start = |t| Plan::Record(RecordCommand::Start(t, Overrides::default()));
         assert_eq!(plan(&["record"]), start(Target::Focused));
@@ -186,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "recording")]
     fn record_settings_can_follow_the_target() {
         use crate::record::settings::{Audio, Format, Fps, Quality, Resolution};
         let expected = Overrides {
@@ -221,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "capture")]
     fn output_is_global() {
         let cli = Cli::try_parse_from(["screencapture", "all", "-o", "/tmp/x"]).unwrap();
         assert_eq!(cli.output.as_deref(), Some(std::path::Path::new("/tmp/x")));
