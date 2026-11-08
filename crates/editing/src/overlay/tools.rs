@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use gpui::{
     App, Bounds, CursorStyle, Div, PathBuilder, PathStyle, Pixels, RenderImage, SharedString, Stateful,
-    StrokeOptions, Window, div, hsla, point, prelude::*, px, size,
+    StrokeOptions, Window, div, point, prelude::*, px, size,
 };
 
 use screencapture_core::overlay::{
     feature::{Act, Effect},
-    panel, render_image, separator,
+    panel, render_image, separator, theme,
     widgets::{button, color},
 };
 
@@ -88,18 +88,19 @@ fn edit(
 }
 
 fn swatch(id: String, c: Color, selected: bool) -> Stateful<Div> {
+    let theme = theme::current();
     div()
         .id(SharedString::from(id))
-        .size(px(20.))
+        .size(px(24.))
         .mx(px(2.))
         .rounded_full()
         .cursor(CursorStyle::PointingHand)
         .bg(color(c))
         .border_2()
         .border_color(if selected {
-            gpui::white()
+            theme.swatch_ring_selected
         } else {
-            hsla(0., 0., 1., 0.15)
+            theme.swatch_ring_idle
         })
 }
 

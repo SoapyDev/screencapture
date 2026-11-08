@@ -15,9 +15,8 @@ use screencapture_core::{
     capture::{MonitorInfo, Rect},
     drawings::Shared,
     overlay::{
-        ACCENT,
         feature::{Act, Ctx, Effect, Feature, Point},
-        handle_div, local, rect_div, report_unremembered, widgets,
+        handle_div, local, rect_div, report_unremembered, theme, widgets,
     },
     units::{ToF32, saturating_i32, unsigned},
 };
@@ -226,7 +225,7 @@ impl Editing {
         vec![
             rect_div(outline)
                 .border_1()
-                .border_color(ACCENT)
+                .border_color(theme::current().accent)
                 .into_any_element(),
             caret.into_any_element(),
         ]
@@ -381,7 +380,9 @@ impl Feature for Editing {
             let (x, y) = to_local(shape.points[0]);
             let radius = saturating_i32(shape.radius().round()) + 4;
             let ring = rect_div(Rect::new(x - radius, y - radius, 2 * radius, 2 * radius)).rounded_full();
-            ring.border_2().border_color(ACCENT).into_any_element()
+            ring.border_2()
+                .border_color(theme::current().accent)
+                .into_any_element()
         });
         let handles = shape.handles().into_iter().map(|handle| {
             let (x, y) = to_local(handle);

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{AnyElement, Keystroke, prelude::*};
+use gpui::{Keystroke, prelude::*};
 
 use screencapture_core::{
     overlay::{
@@ -81,6 +81,10 @@ fn capture_label(ctx: &Ctx) -> (String, bool) {
 }
 
 impl Feature for Capturing {
+    fn has_drawer(&self) -> bool {
+        true
+    }
+
     fn key(&mut self, key: &Keystroke, ctx: &Ctx) -> Option<Effect> {
         match key.key.as_str() {
             "enter" => Some(self.save(ctx.selection.confirm())),
@@ -89,22 +93,16 @@ impl Feature for Capturing {
         }
     }
 
-    fn main_buttons(&self, act: &Act) -> Vec<AnyElement> {
-        let folder = widgets::button("folder", self.folder_label(), false);
-        vec![
-            folder
-                .on_click(act.on(|me: &mut Self, _| me.browse()))
-                .into_any_element(),
-        ]
-    }
-
     fn actions(&self, act: &Act, ctx: &Ctx) -> Actions {
         let (label, ready) = capture_label(ctx);
-        let capture = widgets::button("capture", label, ready);
+        let hint = format!("{label}  ·  {}", folder::shown(&self.screenshots.dir(None)));
+        let capture = widgets::round_button("capture", widgets::Glyph::Camera, hint, ready);
         let capture = capture.on_click(act.on(|me: &mut Self, ctx| me.save(ctx.selection.confirm())));
+        let folder = widgets::button("folder", self.folder_label(), false);
+        let folder = folder.on_click(act.on(|me: &mut Self, _| me.browse()));
         Actions {
             main: vec![capture.into_any_element()],
-            settings: Vec::new(),
+            drawer: vec![folder.into_any_element()],
         }
     }
 

@@ -52,12 +52,12 @@ pub struct HandOver {
     pub drawings: Option<Shared>,
 }
 
-/// A feature's buttons in the action bar: what to do with the selection (side by side with
-/// the other features'), then its settings, in a group of their own.
+/// A feature's part of the action bar: its buttons (stacked over the other features'), and
+/// the drawer that opens beside them with its settings.
 #[derive(Default)]
 pub struct Actions {
     pub main: Vec<AnyElement>,
-    pub settings: Vec<AnyElement>,
+    pub drawer: Vec<AnyElement>,
 }
 
 /// What features may read of the overlay.
@@ -131,11 +131,6 @@ pub trait Feature: Any {
         Vec::new()
     }
 
-    /// Buttons in the top bar's first row.
-    fn main_buttons(&self, _act: &Act) -> Vec<AnyElement> {
-        Vec::new()
-    }
-
     /// Rows of its own under the top bar's first row.
     fn rows(&self, _act: &Act) -> Vec<AnyElement> {
         Vec::new()
@@ -144,6 +139,11 @@ pub trait Feature: Any {
     /// Something opened beside the rows (a colour picker).
     fn popup(&self, _act: &Act) -> Option<AnyElement> {
         None
+    }
+
+    /// Whether its action button has a drawer, which the toggle key (D) steps through.
+    fn has_drawer(&self) -> bool {
+        false
     }
 
     /// Its buttons in the bottom action bar.

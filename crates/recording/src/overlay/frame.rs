@@ -43,27 +43,20 @@ pub use view::{display_of, layer_options, show};
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 mod view {
     use gpui::{
-        AnyView, AnyWindowHandle, App, Bounds, Context, DisplayId, Hsla, Point, Window,
-        WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size,
+        AnyView, AnyWindowHandle, App, Bounds, Context, DisplayId, Point, Window, WindowBackgroundAppearance,
+        WindowBounds, WindowKind, WindowOptions, div, prelude::*, px, size,
     };
 
     use super::{Shown, Spec};
     use screencapture_core::{
         capture::{MonitorInfo, Rect},
-        overlay::{layout, rect_div},
+        overlay::{layout, rect_div, theme},
         units::{ToF32, saturating_i32},
     };
 
     use crate::{
         frame::{self, Surface},
         overlay::controls,
-    };
-
-    const RED: Hsla = Hsla {
-        h: 0.0,
-        s: 0.9,
-        l: 0.55,
-        a: 0.95,
     };
 
     /// Open the frame (and drawings) for `spec`, and the strips that open the controls.
@@ -166,7 +159,12 @@ mod view {
 
     impl Render for FrameView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let strips = self.surface.strips.iter().map(|strip| rect_div(*strip).bg(RED));
+            let colour = theme::current().danger_fill;
+            let strips = self
+                .surface
+                .strips
+                .iter()
+                .map(|strip| rect_div(*strip).bg(colour));
             div()
                 .size_full()
                 .relative()

@@ -175,16 +175,18 @@ const MIN_SIDE: i32 = 16;
 /// When what is left is too small to record.
 #[cfg(test)]
 pub fn inset(area: Rect, monitors: &[MonitorInfo]) -> Result<Rect> {
-    let room = room_for_border(area, monitors);
+    let screens: Vec<Rect> = monitors.iter().map(|m| m.rect).collect();
+    let room = room_for_border(area, &screens);
     // Encoders work on 2×2 blocks of colour.
     let even = Rect::new(room.x, room.y, room.w - room.w % 2, room.h - room.h % 2);
     ensure_recordable(even)
 }
 
-/// `area` shrunk where the strip just outside an edge, which the border needs, is on no screen.
+/// `area` shrunk where the strip just outside an edge, which the border needs, is on none of
+/// the recorded `screens`: the frame never lands on a screen that is not recorded.
 #[must_use]
-pub fn room_for_border(area: Rect, monitors: &[MonitorInfo]) -> Rect {
-    let on_screen = |(x, y): (i32, i32)| monitors.iter().any(|m| m.rect.contains(x, y));
+pub fn room_for_border(area: Rect, screens: &[Rect]) -> Rect {
+    let on_screen = |(x, y): (i32, i32)| screens.iter().any(|screen| screen.contains(x, y));
     // How far an edge must move in so that both ends of the strip outside it are on a screen.
     let room = |strip: &dyn Fn(i32) -> [(i32, i32); 2]| {
         (0..=BORDER)
@@ -283,7 +285,7 @@ pub fn plan(
 ) -> Result<Plan> {
     let area = area(target, monitors, focused)?;
     let screens = screens_of(target, area, monitors, focused);
-    let (parts, joined) = super::split::split(area, &screens, monitors)?;
+    let (parts, joined) = super::split::split(area, &screens)?;
     let video = Video::fitted(joined, density_of(&screens), settings);
     let rate = frame_rate(settings.fps, refresh_rate(&screens), load);
     let several = parts.len() > 1;
@@ -686,9 +688,9 @@ mod tests {
     }
 
     #[test]
-    fn a_neighbouring_screen_can_hold_the_border() {
+    fn a_recorded_neighbouring_screen_can_hold_the_border() {
         let m = three();
-        // HDMI-A-1 alone: its left and right edges have DP-1 and DP-2 next to them.
+        // HDMI-A-1 with DP-1 and DP-2 recorded too: they hold the border at its sides.
         assert_eq!(
             inset(m[1].rect, &m).unwrap(),
             Rect::new(2560, BORDER, 2560, 1440 - 2 * BORDER)
@@ -791,7 +793,10 @@ mod tests {
     fn a_screen_is_recorded_with_room_for_the_frame() {
         let m = three();
         let job = single(&planned(&Target::Focused, Settings::default(), &m)).clone();
-        assert_eq!(job.area, inset(m[2].rect, &m).expect("a screen is recordable"));
+        assert_eq!(
+            job.area,
+            inset(m[2].rect, &m[2..]).expect("a screen is recordable")
+        );
     }
 
     #[test]

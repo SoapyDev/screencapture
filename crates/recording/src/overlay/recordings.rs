@@ -73,6 +73,17 @@ impl Recordings {
         );
     }
 
+    /// What a recording would be, for the button: format, resolution and rate.
+    fn summary(&self) -> String {
+        let settings = self.recording.record;
+        let (format, resolution, fps) = (
+            settings.format.name(),
+            settings.resolution.name(),
+            settings.fps.name(),
+        );
+        format!("{format} · {resolution} · {fps} fps")
+    }
+
     fn folder_label(&self) -> String {
         format!("Videos in {}  ⇧O", folder::shown(&self.recording.dir(None)))
     }
@@ -119,7 +130,15 @@ fn setting_button<T: Choice>(
     field: fn(&mut Settings) -> &mut T,
 ) -> Stateful<Div> {
     let cycle = act.on(move |me: &mut Recordings, _| me.cycle_setting(field));
-    widgets::button(id, value.label(), false).on_click(cycle)
+    widgets::steady_button(id, value.label(), widest_label::<T>(), false).on_click(cycle)
+}
+
+/// The longest label the setting can show: its button never gets narrower or wider than that.
+fn widest_label<T: Choice>() -> String {
+    let labels = T::value_variants().iter().map(|value| value.label());
+    labels
+        .max_by_key(|label| label.chars().count())
+        .unwrap_or_default()
 }
 
 /// What recording the selection means. Picking every screen is "all".
@@ -132,6 +151,10 @@ pub fn record_target(request: Request, screen_count: usize) -> Target {
 }
 
 impl Feature for Recordings {
+    fn has_drawer(&self) -> bool {
+        true
+    }
+
     fn key(&mut self, key: &Keystroke, ctx: &Ctx) -> Option<Effect> {
         let shift = key.modifiers.shift;
         match key.key.as_str() {
@@ -142,8 +165,10 @@ impl Feature for Recordings {
     }
 
     fn actions(&self, act: &Act, _: &Ctx) -> Actions {
-        let record = act.on(|me: &mut Self, ctx| me.record(false, ctx.selection));
-        let record = widgets::button("record", "● Record  V", false).on_click(record);
+        let start = act.on(|me: &mut Self, ctx| me.record(false, ctx.selection));
+        let hint = format!("Record  V  ·  {}", self.summary());
+        let record = widgets::round_button("record", widgets::Glyph::RecordDot, hint, false);
+        let record = record.on_click(start);
         let videos = widgets::button("videos", SharedString::from(self.folder_label()), false);
         let videos = videos.on_click(act.on(|me: &mut Self, _| me.browse()));
         let settings = self
@@ -152,7 +177,7 @@ impl Feature for Recordings {
             .map(IntoElement::into_any_element);
         Actions {
             main: vec![record.into_any_element()],
-            settings: settings
+            drawer: settings
                 .chain([separator().into_any_element(), videos.into_any_element()])
                 .collect::<Vec<AnyElement>>(),
         }
@@ -193,6 +218,17 @@ mod tests {
     fn every_screen_records_all() {
         let picked = vec!["DP-1".to_string(), "DP-2".to_string()];
         assert_eq!(record_target(Request::Screens(picked), 2), Target::All);
+    }
+
+    #[test]
+    fn the_record_button_summarises_format_resolution_and_rate() {
+        let summary = Recordings::new(Recording::default()).summary();
+        assert_eq!(summary, "MP4 · AV1 · Native · Native fps");
+    }
+
+    #[test]
+    fn the_widest_fps_label_is_the_longest_one() {
+        assert_eq!(widest_label::<crate::settings::Fps>(), "FPS Adaptive");
     }
 
     #[test]

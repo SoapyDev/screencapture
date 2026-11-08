@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
 libc.workspace = true
 memmap2 = { workspace = true, optional = true }
 wayland-client = { workspace = true, optional = true }

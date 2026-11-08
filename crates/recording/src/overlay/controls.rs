@@ -6,10 +6,10 @@ use std::{cell::Cell, rc::Rc, time::Instant};
 
 use gpui::{
     Animation, AnimationExt, AnyWindowHandle, App, AppContext, Context, Entity, SharedString, Window, div,
-    ease_in_out, prelude::*, px, rgba,
+    ease_in_out, prelude::*, px,
 };
 
-use screencapture_core::overlay::{actions, panel, separator, widgets};
+use screencapture_core::overlay::{motion, panel, separator, theme, widgets};
 
 use super::{
     drawer::{self, Change, Drawer},
@@ -176,7 +176,7 @@ impl DrawerView {
 
 impl Render for DrawerView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let slide_in = Animation::new(actions::SLIDE).with_easing(ease_in_out);
+        let slide_in = Animation::new(motion::slide()).with_easing(ease_in_out);
         let panel = self
             .panel(cx)
             .with_animation("drawer-in", slide_in, |panel, delta| {
@@ -200,12 +200,17 @@ impl DrawerView {
         let stop = command_button(&self.controls, "stop", "■ Stop", Command::Stop);
         let discard = command_button(&self.controls, "discard", "✕ Discard", Command::Discard);
         panel()
-            .child(div().size(px(10.)).rounded_full().bg(rgba(0xff4d_4dff)))
+            .child(
+                div()
+                    .size(px(10.))
+                    .rounded_full()
+                    .bg(theme::current().danger_fill),
+            )
             .child(div().px_2().child(clock))
             .child(
                 div()
                     .px_2()
-                    .text_color(rgba(0xffff_ffa0))
+                    .text_color(theme::current().on_surface_muted)
                     .child(controls.summary.clone()),
             )
             .child(separator())

@@ -15,19 +15,16 @@ pub struct Part {
     pub slot: (i32, i32),
 }
 
-/// The parts of `area` on `screens`, with room for the frame where no screen is beyond, even
-/// sizes, and slots that close the gaps between screens (like stitched screenshots). Also the
+/// The parts of `area` on `screens`.
+///
+/// Room is left for the frame where no recorded screen is beyond, sizes are even, and slots that close the gaps between screens (like stitched screenshots). Also the
 /// joined video's size.
 ///
 /// # Errors
 ///
 /// When `area` is too small to record on every screen once the frame has room.
-pub fn split(
-    area: Rect,
-    screens: &[&MonitorInfo],
-    monitors: &[MonitorInfo],
-) -> Result<(Vec<Part>, (i32, i32))> {
-    let pieces = pieces_on(area, screens, monitors);
+pub fn split(area: Rect, screens: &[&MonitorInfo]) -> Result<(Vec<Part>, (i32, i32))> {
+    let pieces = pieces_on(area, screens);
     let areas = pieces
         .iter()
         .map(|&piece| plan::ensure_recordable(even_out(piece, &pieces)))
@@ -46,11 +43,12 @@ pub fn split(
 
 /// The pieces of `area` on `screens`, with room for the frame. A sliver too small to record
 /// (a region reaching a few px onto the next screen) is left out, unless every piece is one.
-fn pieces_on(area: Rect, screens: &[&MonitorInfo], monitors: &[MonitorInfo]) -> Vec<Rect> {
-    let pieces: Vec<Rect> = screens
+fn pieces_on(area: Rect, screens: &[&MonitorInfo]) -> Vec<Rect> {
+    let recorded: Vec<Rect> = screens.iter().map(|screen| screen.rect).collect();
+    let pieces: Vec<Rect> = recorded
         .iter()
-        .filter_map(|screen| screen.rect.intersect(area))
-        .map(|piece| plan::room_for_border(piece, monitors))
+        .filter_map(|screen| screen.intersect(area))
+        .map(|piece| plan::room_for_border(piece, &recorded))
         .collect();
     if !pieces.iter().copied().any(plan::is_recordable) {
         return pieces;
@@ -160,28 +158,35 @@ mod tests {
     #[test]
     fn one_screen_is_one_part() {
         let m = three();
-        let (parts, _) = split(m[1].rect, &[&m[1]], &m).expect("a screen can be split");
+        let (parts, _) = split(m[1].rect, &[&m[1]]).expect("a screen can be split");
         assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn a_screen_keeps_its_frame_off_the_neighbouring_screens() {
+        let m = three();
+        let (parts, _) = split(m[1].rect, &[&m[1]]).expect("a screen can be split");
+        assert_eq!(parts[0].area.x, m[1].rect.x + BORDER);
     }
 
     #[test]
     fn every_screen_gets_a_part() {
         let m = three();
-        let (parts, _) = split(desktop(&m), &all_of(&m), &m).expect("the desktop can be split");
+        let (parts, _) = split(desktop(&m), &all_of(&m)).expect("the desktop can be split");
         assert_eq!(parts.len(), 3);
     }
 
     #[test]
     fn outer_edges_leave_room_for_the_frame() {
         let m = three();
-        let (parts, _) = split(desktop(&m), &all_of(&m), &m).expect("the desktop can be split");
+        let (parts, _) = split(desktop(&m), &all_of(&m)).expect("the desktop can be split");
         assert_eq!(parts[0].area.y, BORDER);
     }
 
     #[test]
     fn parts_are_even_sized() {
         let m = three();
-        let (parts, _) = split(desktop(&m), &all_of(&m), &m).expect("the desktop can be split");
+        let (parts, _) = split(desktop(&m), &all_of(&m)).expect("the desktop can be split");
         assert!(
             parts.iter().all(|p| p.area.w % 2 == 0 && p.area.h % 2 == 0),
             "{parts:?}"
@@ -191,7 +196,7 @@ mod tests {
     #[test]
     fn evening_out_trims_the_side_away_from_a_neighbour() {
         let m = three();
-        let (parts, _) = split(desktop(&m), &all_of(&m), &m).expect("the desktop can be split");
+        let (parts, _) = split(desktop(&m), &all_of(&m)).expect("the desktop can be split");
         // DP-1's part ends where HDMI-A-1's begins: no seam in the joined video.
         assert_eq!(parts[0].area.right(), parts[1].area.x);
     }
@@ -199,14 +204,14 @@ mod tests {
     #[test]
     fn neighbouring_parts_sit_side_by_side() {
         let m = three();
-        let (parts, _) = split(desktop(&m), &all_of(&m), &m).expect("the desktop can be split");
+        let (parts, _) = split(desktop(&m), &all_of(&m)).expect("the desktop can be split");
         assert_eq!(parts[1].slot, (parts[0].area.w, 0));
     }
 
     #[test]
     fn the_joined_size_covers_every_part() {
         let m = three();
-        let (parts, size) = split(desktop(&m), &all_of(&m), &m).expect("the desktop can be split");
+        let (parts, size) = split(desktop(&m), &all_of(&m)).expect("the desktop can be split");
         let width: i32 = parts.iter().map(|p| p.area.w).sum();
         assert_eq!(size, (width, parts[0].area.h));
     }
@@ -215,7 +220,7 @@ mod tests {
     fn a_screen_left_out_leaves_no_gap() {
         let m = three();
         let picked = [&m[0], &m[2]];
-        let (parts, _) = split(desktop(&m), &picked, &m).expect("two screens can be split");
+        let (parts, _) = split(desktop(&m), &picked).expect("two screens can be split");
         assert_eq!(parts[1].slot.0, parts[0].area.w);
     }
 
@@ -224,7 +229,7 @@ mod tests {
         let m = three();
         let region = Rect::new(2000, 300, 1000, 500);
         let touched = [&m[0], &m[1]];
-        let (parts, _) = split(region, &touched, &m).expect("a region can be split");
+        let (parts, _) = split(region, &touched).expect("a region can be split");
         assert_eq!((parts[0].area.right(), parts[1].area.x), (2560, 2560));
     }
 
@@ -237,7 +242,7 @@ mod tests {
     fn a_sliver_on_a_neighbouring_screen_is_left_out() {
         let m = three();
         let (parts, _) =
-            split(a_region_a_sliver_into_dp_1(), &[&m[0], &m[1]], &m).expect("the sliver is dropped");
+            split(a_region_a_sliver_into_dp_1(), &[&m[0], &m[1]]).expect("the sliver is dropped");
         assert_eq!(parts.len(), 1);
     }
 
@@ -245,7 +250,7 @@ mod tests {
     fn leaving_a_sliver_out_keeps_the_rest_of_the_region() {
         let m = three();
         let (parts, _) =
-            split(a_region_a_sliver_into_dp_1(), &[&m[0], &m[1]], &m).expect("the sliver is dropped");
+            split(a_region_a_sliver_into_dp_1(), &[&m[0], &m[1]]).expect("the sliver is dropped");
         assert_eq!(parts[0].area, Rect::new(2560, 300, 498, 500));
     }
 
@@ -254,6 +259,6 @@ mod tests {
         let m = three();
         // 10 px on DP-1, 10 px on HDMI-A-1.
         let region = Rect::new(2550, 300, 20, 500);
-        assert!(split(region, &[&m[0], &m[1]], &m).is_err());
+        assert!(split(region, &[&m[0], &m[1]]).is_err());
     }
 }

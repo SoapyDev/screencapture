@@ -23,6 +23,9 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b" }
 # runs headless.
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e231594b6b", features = ["font-kit"] }
 anyhow = "1"
+# The desktop's accent colour over D-Bus. Same features gpui asks of it (async-io, no tokio), so
+# nothing is built twice.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"

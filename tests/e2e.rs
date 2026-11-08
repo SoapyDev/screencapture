@@ -89,6 +89,36 @@ fn overlay_capture_does_not_contain_the_overlay() {
 
 #[test]
 #[ignore = "needs a graphical session; briefly shows the overlay"]
+fn a_capture_with_a_drawer_open_does_not_contain_the_drawer() {
+    let _desktop = desktop();
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let geometry = "40,40 400x300";
+    let headless = saved_path(
+        &bin()
+            .args(["region", "-g", geometry, "-o"])
+            .arg(dir.path())
+            .output()
+            .expect("the headless capture runs"),
+    );
+    let with_drawer = saved_path(
+        &bin()
+            .args(["region", "-o"])
+            .arg(dir.path())
+            .env("SCREENCAPTURE_E2E_SELECT", geometry)
+            .env("SCREENCAPTURE_E2E_DRAWER", "1")
+            .output()
+            .expect("the overlay capture runs"),
+    );
+    let (a, b) = (mean_brightness(&headless), mean_brightness(&with_drawer));
+    // A drawer (or the dimmed overlay) caught in the capture would show as a big change.
+    assert!(
+        (a - b).abs() / a.max(1.0) < 0.1,
+        "headless {a:.1} vs with a drawer {b:.1}"
+    );
+}
+
+#[test]
+#[ignore = "needs a graphical session; briefly shows the overlay"]
 fn drawings_are_saved_in_the_capture() {
     let _desktop = desktop();
     let dir = tempfile::tempdir().unwrap();

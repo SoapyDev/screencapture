@@ -10,13 +10,19 @@
 //! the daemon it is the only work done before the windows open.
 
 pub mod actions;
+pub mod drawer;
+pub mod drawers;
 pub mod feature;
 pub mod folder;
 #[cfg(unix)]
 pub mod gate;
 pub mod layout;
+mod look;
+pub mod motion;
+pub mod navigation;
 #[cfg(unix)]
 pub mod service;
+pub mod theme;
 pub mod widgets;
 
 use std::{
@@ -28,6 +34,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use gpui::{
@@ -35,7 +42,7 @@ use gpui::{
     FontWeight, Hsla, ImageSource, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, PlatformDisplay, Point, QuitMode, RenderImage,
     ScrollDelta, ScrollEvent, SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions, canvas, div, hsla, img, prelude::*, px, rgba, size,
+    WindowOptions, canvas, div, hsla, img, prelude::*, px, size,
 };
 use smallvec::SmallVec;
 
@@ -159,6 +166,8 @@ pub struct Overlay {
     traced: std::cell::Cell<bool>,
     /// Why the last action couldn't be done, shown above the action bar.
     notice: Option<SharedString>,
+    /// The drawers beside the features' action buttons.
+    drawers: drawers::Drawers,
 }
 
 /// How the program makes its features, in the order they are asked (and their actions shown):
@@ -229,6 +238,7 @@ pub fn run_daemon(
         cx.set_global(FeatureList(features));
         cx.set_quit_mode(QuitMode::Explicit);
         warm_up(cx);
+        std::thread::spawn(look::read_ahead);
         // This process outlives every capture: it can keep the copied image on offer itself.
         crate::clipboard::serve();
         let (tx, rx) = futures::channel::mpsc::unbounded();
@@ -444,6 +454,7 @@ fn run_test_hooks(overlay: &Entity<Overlay>, cx: &App) {
 }
 
 fn open_windows(overlay: &Entity<Overlay>, cx: &mut App) {
+    look::follow_desktop(overlay, cx);
     let mut displays = displays_by_pointer(overlay.read(cx), cx).into_iter();
     // Open the first synchronously, the rest after yielding to the event loop, so the compositor
     // can configure and show the first surface without waiting for the others (~15 ms each).
@@ -593,6 +604,7 @@ impl Overlay {
         resident: bool,
         features: Vec<Box<dyn Feature>>,
     ) -> Self {
+        let drawers = drawers::Drawers::new(features.iter().map(|feature| feature.has_drawer()));
         let screens: Arc<[_]> = frozen.screens.into();
         let images = screens
             .iter()
@@ -613,13 +625,22 @@ impl Overlay {
             tools_ready: false,
             traced: std::cell::Cell::new(false),
             notice: None,
+            drawers,
         }
     }
 
     /// Debug builds: every feature acts on `region` as the end-to-end tests ask.
     #[cfg(debug_assertions)]
     fn test_hooks_on(&mut self, region: Rect, cx: &mut Context<Self>) {
-        for index in 0..self.features.len() {
+        if std::env::var_os("SCREENCAPTURE_E2E_DRAWER").is_some() {
+            self.drawers.toggle_next(Instant::now());
+            self.drawers_changed(cx);
+        }
+        // The first feature (the drawings) acts first, so what is drawn is kept; then the last
+        // first: a recording the test starts wins over a capture "clicked" while the bars slide
+        // away, whatever order the buttons are shown in.
+        let count = self.features.len();
+        for index in std::iter::once(0).chain((1..count).rev()).take(count) {
             if let Some(effect) = self.features[index].test_hook(region) {
                 self.apply(index, effect, cx);
             }
@@ -729,7 +750,7 @@ impl Overlay {
         self.phase = Phase::Leaving;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(actions::SLIDE).await;
+            cx.background_executor().timer(motion::slide()).await;
             let _ = this.update(cx, |o, cx| o.take_over(start, cx));
         })
         .detach();
@@ -824,7 +845,8 @@ impl Overlay {
 
     /// Esc: a feature closes something of its own first, else give up.
     fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.features.iter_mut().any(|feature| feature.escape()) {
+        let closed_a_drawer = self.drawers.escape(Instant::now());
+        if closed_a_drawer || self.features.iter_mut().any(|feature| feature.escape()) {
             cx.notify();
         } else {
             self.cancel(cx);
@@ -878,15 +900,22 @@ impl Overlay {
 
     /// A key while selecting: the features first (a text box takes every key), then the
     /// overlay's own.
-    fn key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    /// What is left for the window to do (move the focus), if the key asked for it.
+    fn key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> Option<navigation::Navigation> {
         if !self.selecting() {
-            return;
+            return None;
         }
         if let Some((index, effect)) = self.feature_key(keystroke) {
             self.apply(index, effect, cx);
-            return;
+            return None;
         }
-        self.own_key(keystroke, cx);
+        let asked = navigation::navigation(keystroke);
+        match asked {
+            Some(navigation::Navigation::ToggleOptions) => self.toggle_next_drawer(cx),
+            Some(_) => return asked,
+            None => self.own_key(keystroke, cx),
+        }
+        None
     }
 
     fn feature_key(&mut self, keystroke: &Keystroke) -> Option<(usize, Effect)> {
@@ -920,6 +949,7 @@ impl Overlay {
         if !self.selecting() {
             return;
         }
+        self.drawers.pressed_outside(Instant::now());
         if !self
             .features
             .iter_mut()
@@ -990,6 +1020,47 @@ impl Overlay {
         }
     }
 
+    /// The pointer entered or left a part of feature `index`'s action button.
+    pub(crate) fn drawer_hover(
+        &mut self,
+        index: usize,
+        part: drawers::Part,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.drawers.hover(index, part, hovered, Instant::now()) {
+            self.drawers_changed(cx);
+        }
+    }
+
+    /// Tab: open the drawers one after the other, pinned.
+    fn toggle_next_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawers.toggle_next(Instant::now());
+        self.drawers_changed(cx);
+    }
+
+    /// A press inside feature `index`'s drawer: it stays open.
+    pub(crate) fn drawer_pressed(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.drawers.option_pressed(index, Instant::now());
+        self.drawers_changed(cx);
+    }
+
+    /// Show the drawers as they are now, and come back when one is waiting on the clock.
+    fn drawers_changed(&self, cx: &mut Context<Self>) {
+        cx.notify();
+        let Some(wait) = self.drawers.next_tick(Instant::now()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |overlay, cx| {
+                overlay.drawers.tick(Instant::now());
+                overlay.drawers_changed(cx);
+            });
+        })
+        .detach();
+    }
+
     /// Click handlers for feature `index`.
     fn act(overlay: &Entity<Self>, index: usize) -> Act {
         Act {
@@ -1053,11 +1124,15 @@ struct View {
     monitor: MonitorInfo,
     image: Option<Arc<RenderImage>>,
     focus: FocusHandle,
+    /// Where this window's action buttons rest, as last painted: their options bars centre on
+    /// them. One per window, as each screen paints its bar in its own place.
+    action_anchor: Rc<std::cell::Cell<Option<Rect>>>,
 }
 
 /// Dark rounded strip the toolbar rows are made of.
 #[must_use]
 pub fn panel() -> Div {
+    let theme = theme::current();
     div()
         .occlude()
         .flex()
@@ -1065,16 +1140,16 @@ pub fn panel() -> Div {
         .gap_1()
         .p_1()
         .rounded_lg()
-        .bg(rgba(0x1e1e_22f0))
+        .bg(theme.surface)
         .border_1()
-        .border_color(hsla(0., 0., 1., 0.12))
+        .border_color(theme.border)
         .text_sm()
-        .text_color(hsla(0., 0., 0.92, 1.))
+        .text_color(theme.on_surface)
 }
 
 #[must_use]
 pub fn separator() -> Div {
-    div().w(px(1.)).h(px(20.)).mx_1().bg(hsla(0., 0., 1., 0.15))
+    div().w(px(1.)).h(px(20.)).mx_1().bg(theme::current().separator)
 }
 
 impl View {
@@ -1093,11 +1168,25 @@ impl View {
             monitor,
             image,
             focus,
+            action_anchor: Rc::default(),
         }
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.overlay.update(cx, |o, cx| o.key(&event.keystroke, cx));
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        if navigation::presses_focused_button(key) && self.button_has_focus(window, cx) {
+            return;
+        }
+        match self.overlay.update(cx, |o, cx| o.key(key, cx)) {
+            Some(navigation::Navigation::FocusNext) => window.focus_next(cx),
+            Some(navigation::Navigation::FocusPrevious) => window.focus_prev(cx),
+            _ => {}
+        }
+    }
+
+    /// A button, not the overlay itself, has the keyboard focus: it takes Enter and Space.
+    fn button_has_focus(&self, window: &Window, cx: &App) -> bool {
+        window.focused(cx).is_some_and(|focused| focused != self.focus)
     }
 
     fn on_press(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1147,12 +1236,6 @@ impl View {
     }
 }
 
-pub const ACCENT: Hsla = Hsla {
-    h: 0.58,
-    s: 0.85,
-    l: 0.55,
-    a: 1.,
-};
 const DIM: Hsla = Hsla {
     h: 0.,
     s: 0.,
@@ -1160,7 +1243,7 @@ const DIM: Hsla = Hsla {
     a: 0.45,
 };
 /// Side of the square resize handles, in logical px.
-const HANDLE: i32 = 8;
+const HANDLE: i32 = 10;
 
 #[must_use]
 pub fn rect_div(r: Rect) -> Div {
@@ -1175,9 +1258,9 @@ pub fn rect_div(r: Rect) -> Div {
 #[must_use]
 pub fn handle_div(x: i32, y: i32) -> Div {
     rect_div(Rect::new(x - HANDLE / 2, y - HANDLE / 2, HANDLE, HANDLE))
-        .bg(gpui::white())
+        .bg(theme::current().marks.handle_fill)
         .border_1()
-        .border_color(ACCENT)
+        .border_color(theme::current().accent)
 }
 
 /// Window-local position to global logical desktop coordinates.
@@ -1232,7 +1315,7 @@ impl Render for View {
             .children(dims(o, monitor))
             .children(selection_marks(o, monitor))
             .children(over)
-            .children(bars(&self.overlay, o, monitor))
+            .children(bars(&self.overlay, o, monitor, &self.action_anchor))
             .child(pointer_listeners(self.overlay.clone(), monitor.rect))
     }
 }
@@ -1278,14 +1361,17 @@ fn region_marks(o: &Overlay, monitor: Rect, hovered: bool) -> Vec<AnyElement> {
         let hint = (region.is_none() && hovered).then(|| {
             let outline = rect_div(local(monitor, monitor)).border_2();
             outline
-                .border_color(hsla(0.58, 0.85, 0.55, 0.5))
+                .border_color(theme::current().accent_hint)
                 .into_any_element()
         });
         return hint.into_iter().collect();
     };
     let shown = local(selected, monitor);
     let handles = (!o.busy() && !o.holds_a_tool()).then(|| region_handles(shown));
-    let outline = rect_div(shown).border_1().border_color(ACCENT).into_any_element();
+    let outline = rect_div(shown)
+        .border_1()
+        .border_color(theme::current().accent)
+        .into_any_element();
     let label = size_label(selected, shown, monitor.h).into_any_element();
     std::iter::once(outline)
         .chain(handles.into_iter().flatten())
@@ -1324,18 +1410,19 @@ fn size_label(selected: Rect, shown: Rect, screen_height: i32) -> Div {
         .top(px(top.to_f32()))
         .px_2()
         .rounded_sm()
-        .bg(rgba(0x0000_00c0))
+        .bg(theme::current().marks.scrim)
         .text_xs()
-        .text_color(gpui::white())
+        .text_color(theme::current().marks.on_scrim)
         .child(format!("{} × {}", selected.w, selected.h))
 }
 
 /// A screen in Screens mode: its name, with a border when picked or under the pointer.
 fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
+    let theme = theme::current();
     let border = if picked {
-        ACCENT
+        theme.accent
     } else if hovered {
-        hsla(0., 0., 1., 0.5)
+        theme.marks.screen_hover_outline
     } else {
         hsla(0., 0., 0., 0.)
     };
@@ -1343,10 +1430,10 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
         .px_4()
         .py_2()
         .rounded_lg()
-        .bg(rgba(0x0000_00a0))
+        .bg(theme.marks.scrim_soft)
         .text_2xl()
         .font_weight(FontWeight::BOLD)
-        .text_color(gpui::white())
+        .text_color(theme.marks.on_scrim)
         .child(format!("{}{}", if picked { "✓ " } else { "" }, monitor.name));
     let area = rect_div(local(monitor.rect, monitor.rect))
         .border_4()
@@ -1356,7 +1443,12 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
 
 /// The toolbar and the action bar, on the screen under the pointer (all of them until the
 /// pointer is seen), hidden while dragging so they never get in the way.
-fn bars(overlay: &Entity<Overlay>, o: &Overlay, monitor: &MonitorInfo) -> Vec<AnyElement> {
+fn bars(
+    overlay: &Entity<Overlay>,
+    o: &Overlay,
+    monitor: &MonitorInfo,
+    anchor: &Rc<std::cell::Cell<Option<Rect>>>,
+) -> Vec<AnyElement> {
     let elsewhere = o.selection.hovered().is_some_and(|m| m.name != monitor.name);
     if o.busy() || elsewhere {
         return Vec::new();
@@ -1365,7 +1457,7 @@ fn bars(overlay: &Entity<Overlay>, o: &Overlay, monitor: &MonitorInfo) -> Vec<An
     let edge = layout::toolbar_edge(monitor.rect, o.selection.region());
     vec![
         toolbar(overlay, o, edge, leaving),
-        action_bar(overlay, o, leaving),
+        action_bar(overlay, o, monitor.rect, anchor, leaving),
     ]
 }
 
@@ -1406,25 +1498,34 @@ fn main_row(overlay: &Entity<Overlay>, o: &Overlay) -> Div {
     let (mode, all) = (o.selection.mode, o.selection.is_all());
     let region = widgets::button("region", "Region  R", mode == Mode::Region);
     let screens = widgets::button("screens", "Screens  S", mode == Mode::Screens && !all);
-    let feature_buttons = o.features.iter().enumerate();
-    let feature_buttons =
-        feature_buttons.flat_map(|(index, f)| f.main_buttons(&Overlay::act(overlay, index)));
     panel()
         .child(region.on_click(act(|o, cx| o.set_mode(Mode::Region, cx))))
         .child(screens.on_click(act(|o, cx| o.set_mode(Mode::Screens, cx))))
         .child(widgets::button("all", "All screens  A", all).on_click(act(Overlay::select_all)))
         .child(separator())
-        .children(feature_buttons)
         .child(widgets::button("close", "✕", false).on_click(act(Overlay::cancel)))
 }
 
-fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, leaving: bool) -> AnyElement {
+/// The action bar on `screen`, noting where its buttons are painted in `anchor`.
+fn action_bar(
+    overlay: &Entity<Overlay>,
+    o: &Overlay,
+    screen: Rect,
+    anchor: &Rc<std::cell::Cell<Option<Rect>>>,
+    leaving: bool,
+) -> AnyElement {
     let ctx = Ctx {
         selection: &o.selection,
     };
     let features = o.features.iter().enumerate();
     let actions = features.map(|(index, f)| f.actions(&Overlay::act(overlay, index), &ctx));
-    actions::action_bar(actions.collect(), o.notice.as_ref(), leaving)
+    let bar = actions::ActionBar {
+        overlay,
+        drawers: &o.drawers,
+        anchor,
+        screen: local(screen, screen),
+    };
+    bar.render(actions.collect(), o.notice.as_ref(), leaving)
 }
 
 /// Window-wide listeners: during a drag the compositor keeps sending pointer events to the

@@ -91,6 +91,7 @@ Selecting:
   clears it.
 - Screens mode (`S`): click screens to toggle them. `A` picks every screen.
 - `O` changes the screenshots' folder, `Shift+O` the videos'; `Esc` or right-click cancels.
+- The Capture and Record buttons each have a drawer on their left (the folder; the recording options): it opens when the pointer rests on the button, stays while the pointer is on it, and a click on an option pins it until a click outside or `Esc`. `D` opens the drawers one after the other; `Tab` and `Shift+Tab` move between the buttons (a ring shows the focused one) and `Enter` or `Space` presses it.
 
 Drawing works for every kind of capture (region, one screen, several, all). Shapes are drawn
 over the frozen desktop and burnt into the saved PNG at its full resolution; with stitched
@@ -179,6 +180,27 @@ Hyprland binds, for example:
 ```lua
 hl.bind("SUPER + Print", hl.dsp.exec_cmd("/home/you/.local/bin/screencapture record toggle"))
 ```
+
+## Theme
+
+The overlay's bars follow the desktop's colours (the drawing colours are yours and never change).
+Light or dark follows the desktop live; the colours themselves are read once when the program
+starts, so **restart the daemon** after changing the theme or the keys below. Keys of
+`~/.config/screencapture/config.json`:
+
+| Key | Values (default first) |
+|---|---|
+| `theme` | `follow`, `dark`, `light` (a forced scheme keeps the desktop's accent) |
+| `theme_source` | `auto` (KDE's `kdeglobals` on KDE, else the GTK stylesheet, then the portal's accent), `gtk` (`~/.config/gtk-4.0/gtk.css` and its imports), `kde` (`kdeglobals`), `portal` (accent only), `builtin` |
+| `theme_accent` | `#rrggbb`, instead of the desktop's accent |
+
+Text and the active button are kept readable (4.5:1) whatever the desktop's colours are.
+
+## Reduced motion
+
+Set `"reduced_motion": true` in the config, or `SCREENCAPTURE_REDUCED_MOTION=1` in the
+environment (it wins over the config), and the bars appear and leave at once instead of sliding.
+Read once per process: restart the daemon after changing it.
 
 ## Latency
 
