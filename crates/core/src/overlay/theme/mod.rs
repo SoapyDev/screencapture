@@ -7,7 +7,12 @@ use std::sync::RwLock;
 
 use gpui::{Hsla, WindowAppearance, black, hsla, rgba, white};
 
+pub mod choice;
 pub mod contrast;
+pub mod css;
+pub mod gtk;
+pub mod kde;
+pub mod roles;
 
 use contrast::{made_readable_on, readable_on};
 
@@ -80,10 +85,7 @@ impl ChromeTheme {
     /// The built-in theme for `scheme`.
     #[must_use]
     pub fn built_in(scheme: Scheme) -> Self {
-        Self::from_basis(match scheme {
-            Scheme::Dark => Basis::dark(),
-            Scheme::Light => Basis::light(),
-        })
+        Self::from_basis(Basis::built_in(scheme))
     }
 
     /// The overlay's original look: dark bars, blue accent.
@@ -134,6 +136,13 @@ impl ContentMarks {
 }
 
 impl Basis {
+    fn built_in(scheme: Scheme) -> Self {
+        match scheme {
+            Scheme::Dark => Self::dark(),
+            Scheme::Light => Self::light(),
+        }
+    }
+
     fn dark() -> Self {
         Self {
             surface: from_rgba(0x1e1e_22ff),

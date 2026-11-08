@@ -14,6 +14,12 @@ pub fn ratio(foreground: Hsla, background: Hsla) -> f32 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
+/// Whether `colour` is on the dark side: white reads on it better than black does.
+#[must_use]
+pub fn is_dark(colour: Hsla) -> bool {
+    ratio(white(), colour) > ratio(black(), colour)
+}
+
 /// White or black, whichever reads better on `background`.
 #[must_use]
 pub fn readable_on(background: Hsla) -> Hsla {
@@ -73,6 +79,16 @@ mod tests {
     #[test]
     fn white_reads_best_on_a_dark_blue() {
         assert_eq!(readable_on(hsla(0.6, 0.8, 0.3, 1.)), white());
+    }
+
+    #[test]
+    fn a_dark_blue_is_dark() {
+        assert!(is_dark(hsla(0.6, 0.8, 0.2, 1.)));
+    }
+
+    #[test]
+    fn a_pale_lavender_is_not_dark() {
+        assert!(!is_dark(hsla(0.75, 0.8, 0.8, 1.)));
     }
 
     #[test]
