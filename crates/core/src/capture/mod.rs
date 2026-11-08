@@ -141,6 +141,39 @@ pub struct MonitorInfo {
     pub output_position: (i32, i32),
     /// Refresh rate in mHz, when the windowing system says.
     pub refresh_mhz: Option<u32>,
+    /// Size in physical pixels, upright: what recording all of it encodes.
+    pub pixels: PixelSize,
+}
+
+impl MonitorInfo {
+    /// Physical pixels per logical pixel (its scale); 1 when either size is unknown.
+    #[must_use]
+    pub fn density(&self) -> f64 {
+        if self.rect.w <= 0 || self.pixels.width == 0 {
+            return 1.;
+        }
+        f64::from(self.pixels.width) / f64::from(self.rect.w)
+    }
+}
+
+/// A size in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PixelSize {
+    #[must_use]
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    /// `rect`'s size at one physical pixel per logical pixel (negative sides count as 0).
+    #[must_use]
+    pub const fn of(rect: Rect) -> Self {
+        Self::new(crate::units::unsigned(rect.w), crate::units::unsigned(rect.h))
+    }
 }
 
 /// Native Wayland capture, unless `SCREENCAPTURE_BACKEND=xcap` forces the portable one.
@@ -269,6 +302,7 @@ impl<C: Deref<Target = [u8]>> Shot<C> {
             rect: self.rect,
             output_position: self.output_position,
             refresh_mhz: None,
+            pixels: PixelSize::new(self.image.width(), self.image.height()),
         }
     }
 
@@ -572,6 +606,42 @@ mod tests {
         }
     }
 
+    fn monitor_of(width: i32, pixels: PixelSize) -> MonitorInfo {
+        MonitorInfo {
+            name: "A".into(),
+            rect: Rect::new(0, 0, width, 1440),
+            output_position: (0, 0),
+            refresh_mhz: None,
+            pixels,
+        }
+    }
+
+    #[test]
+    fn density_is_pixels_per_logical_pixel() {
+        let monitor = monitor_of(2560, PixelSize::new(5120, 2880));
+        assert!(
+            (monitor.density() - 2.).abs() < f64::EPSILON,
+            "{}",
+            monitor.density()
+        );
+    }
+
+    #[test]
+    fn density_without_pixels_is_one() {
+        let monitor = monitor_of(2560, PixelSize::new(0, 0));
+        assert!(
+            (monitor.density() - 1.).abs() < f64::EPSILON,
+            "{}",
+            monitor.density()
+        );
+    }
+
+    #[test]
+    fn a_shot_knows_its_monitors_pixels() {
+        let info = shot("A", Rect::new(0, 0, 100, 50), 2, 1).info();
+        assert_eq!(info.pixels, PixelSize::new(200, 100));
+    }
+
     #[test]
     fn snapshot_knows_its_monitors_in_layout_order() {
         let snap = Snapshot::new(vec![
@@ -587,12 +657,14 @@ mod tests {
                     rect: Rect::new(0, 0, 100, 50),
                     output_position: (0, 0),
                     refresh_mhz: None,
+                    pixels: PixelSize::new(100, 50),
                 },
                 MonitorInfo {
                     name: "B".into(),
                     rect: Rect::new(100, 0, 100, 50),
                     output_position: (200, 0),
                     refresh_mhz: None,
+                    pixels: PixelSize::new(100, 50),
                 },
             ]
         );

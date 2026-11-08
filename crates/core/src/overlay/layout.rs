@@ -70,6 +70,7 @@ pub fn toolbar_edge(monitor: Rect, region: Option<Rect>) -> Edge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::PixelSize;
 
     fn mon(name: &str, x: i32, output_x: i32) -> MonitorInfo {
         MonitorInfo {
@@ -77,6 +78,7 @@ mod tests {
             rect: Rect::new(x, 0, 100, 50),
             output_position: (output_x, 0),
             refresh_mhz: None,
+            pixels: PixelSize::new(100, 50),
         }
     }
 

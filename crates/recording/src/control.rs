@@ -269,7 +269,7 @@ impl Outcome {
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    use screencapture_core::capture::Rect;
+    use screencapture_core::capture::{PixelSize, Rect};
 
     pub struct Fake {
         pub dir: tempfile::TempDir,
@@ -298,6 +298,7 @@ pub mod testing {
                 rect: Rect::new(0, 0, 1920, 1080),
                 output_position: (0, 0),
                 refresh_mhz: Some(144_000),
+                pixels: PixelSize::new(1920, 1080),
             }])
         }
         fn focused(&mut self) -> Option<String> {

@@ -155,6 +155,7 @@ Settings, remembered under `"record"` in the config file and overridable per rec
   changes.
 - H.264 plays everywhere but stops at 4096 px across; wider recordings switch to AV1, and past
   8192 px (AV1/HEVC's limit) they are scaled down to fit. You are told when either happens.
+  These are real pixels: a screen at scale 2 records twice its logical size.
 - GIFs are recorded at most 25 fps and 1280 px wide, then converted with one palette at stop.
 - Several screens (or a region across them) are recorded one screen per recorder, all started
   together, and joined at stop into one video laid out like the desktop, without the gaps

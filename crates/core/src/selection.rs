@@ -395,6 +395,7 @@ const fn handle_at(sides: (Side, Side)) -> Option<Handle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::PixelSize;
 
     fn monitors() -> Vec<MonitorInfo> {
         ["DP-1", "HDMI-A-1", "DP-2"]
@@ -405,6 +406,7 @@ mod tests {
                 rect: Rect::new(left, 0, 100, 50),
                 output_position: (left, 0),
                 refresh_mhz: None,
+                pixels: PixelSize::new(100, 50),
             })
             .collect()
     }
@@ -614,6 +616,7 @@ mod tests {
             rect,
             output_position: (rect.x, rect.y),
             refresh_mhz: None,
+            pixels: PixelSize::of(rect),
         };
         Selection::new(
             Mode::Region,
@@ -655,6 +658,7 @@ mod tests {
             rect: Rect::new(x, 0, 100, 50),
             output_position: (x, 0),
             refresh_mhz: None,
+            pixels: PixelSize::new(100, 50),
         }
     }
 

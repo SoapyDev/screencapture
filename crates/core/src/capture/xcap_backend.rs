@@ -3,14 +3,17 @@
 use anyhow::{Context, Result};
 use xcap::Monitor;
 
-use super::{MonitorInfo, Rect, Shot};
+use super::{MonitorInfo, PixelSize, Rect, Shot};
 use crate::units::{saturating_u32, signed};
 
 fn info(monitor: &Monitor) -> Result<MonitorInfo> {
     let (x, y) = (monitor.x()?, monitor.y()?);
+    let rect = Rect::new(x, y, signed(monitor.width()?), signed(monitor.height()?));
     Ok(MonitorInfo {
         name: monitor.name()?,
-        rect: Rect::new(x, y, signed(monitor.width()?), signed(monitor.height()?)),
+        rect,
+        // xcap measures in pixels already.
+        pixels: PixelSize::of(rect),
         output_position: (x, y),
         refresh_mhz: monitor
             .frequency()

@@ -284,7 +284,7 @@ pub fn plan(
     let area = area(target, monitors, focused)?;
     let screens = screens_of(target, area, monitors, focused);
     let (parts, joined) = super::split::split(area, &screens, monitors)?;
-    let video = Video::fitted(joined, settings);
+    let video = Video::fitted(joined, density_of(&screens), settings);
     let rate = frame_rate(settings.fps, refresh_rate(&screens), load);
     let several = parts.len() > 1;
     let jobs = part_jobs(&parts, &video, settings, rate);
@@ -314,6 +314,12 @@ fn screens_of<'a>(
     }
 }
 
+/// The densest of `screens`, in physical px per logical px: the video keeps every pixel of it.
+fn density_of(screens: &[&MonitorInfo]) -> f64 {
+    let densities = screens.iter().map(|screen| screen.density());
+    densities.reduce(f64::max).unwrap_or(1.)
+}
+
 /// The fastest refresh rate among `screens`, in Hz.
 fn refresh_rate(screens: &[&MonitorInfo]) -> Option<u32> {
     screens
@@ -334,6 +340,8 @@ struct PartRole {
 struct Video {
     /// The joined desktop size, logical px.
     joined: (i32, i32),
+    /// Physical px per logical px on the densest screen recorded.
+    density: f64,
     /// Video px per logical px.
     scale: f64,
     codec: Codec,
@@ -342,14 +350,22 @@ struct Video {
 }
 
 impl Video {
-    fn fitted(joined: (i32, i32), settings: Settings) -> Self {
-        let native = (unsigned(joined.0), unsigned(joined.1));
-        let gif = settings.format == Format::Gif;
+    /// The video for `joined` logical px, recorded at `density`: the encoders' limits and the
+    /// settings' caps apply to its pixels, not to the logical size.
+    fn fitted(joined: (i32, i32), density: f64, settings: Settings) -> Self {
+        let pixels = |logical: i32| unsigned(at_factor(logical, density));
+        let native = (pixels(joined.0), pixels(joined.1));
         let wanted = capped_size(native, settings);
         let (codec, size, notes) = within_codec_limits(wanted, first_codec(settings.format));
-        let scale = f64::from(size.0) / f64::from(native.0);
+        let scale = if size == native {
+            density
+        } else {
+            f64::from(size.0) / f64::from(unsigned(joined.0))
+        };
+        let gif = settings.format == Format::Gif;
         Self {
             joined,
+            density,
             scale,
             codec,
             gif,
@@ -357,14 +373,15 @@ impl Video {
         }
     }
 
-    /// A desktop length in video px (even, rounded the same way for every edge, so that
-    /// neighbouring parts meet exactly).
+    /// A desktop length in video px.
     fn length(&self, logical: i32) -> i32 {
-        if self.scale >= 1. {
-            return logical;
-        }
-        // Not `even`: positions can be 0.
-        saturating_i32((f64::from(logical) * self.scale / 2.).round() * 2.)
+        at_factor(logical, self.scale)
+    }
+
+    /// Whether `area`, recorded as is, already has the size of `slot`.
+    fn fills(&self, area: Rect, slot: Rect) -> bool {
+        let pixels = |logical: i32| at_factor(logical, self.density);
+        (pixels(area.w), pixels(area.h)) == (slot.w, slot.h)
     }
 
     /// Where a part lands in the joined video.
@@ -383,7 +400,7 @@ impl Video {
         rate: (u32, bool),
     ) -> PartJob {
         let slot = self.slot(part);
-        let native = (part.area.w, part.area.h) == (slot.w, slot.h);
+        let native = self.fills(part.area, slot);
         let job = Job {
             area: part.area,
             fps: if self.gif { rate.0.min(GIF_FPS) } else { rate.0 },
@@ -415,6 +432,16 @@ impl Video {
             gif: self.gif,
         }
     }
+}
+
+/// `logical` at `factor` px per logical px, as an even length, rounded the same way for every
+/// edge so that neighbouring parts meet exactly; untouched at 1. (Not [`even`]: positions can
+/// be 0.)
+fn at_factor(logical: i32, factor: f64) -> i32 {
+    if (factor - 1.).abs() < f64::EPSILON {
+        return logical;
+    }
+    saturating_i32((f64::from(logical) * factor / 2.).round() * 2.)
 }
 
 /// `native` after the resolution cap, and for GIFs their width cap.
@@ -592,6 +619,7 @@ pub fn gif_args(fps: u32, video: &Path, gif: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use screencapture_core::capture::PixelSize;
 
     fn monitor(name: &str, x: i32, w: i32, h: i32, hz: u32) -> MonitorInfo {
         MonitorInfo {
@@ -599,6 +627,7 @@ mod tests {
             rect: Rect::new(x, 0, w, h),
             output_position: (x, 0),
             refresh_mhz: Some(hz * 1000),
+            pixels: PixelSize::new(unsigned(w), unsigned(h)),
         }
     }
 
@@ -737,6 +766,7 @@ mod tests {
     fn wide(width: i32) -> [MonitorInfo; 1] {
         [MonitorInfo {
             rect: Rect::new(0, 0, width, 1440),
+            pixels: PixelSize::new(unsigned(width), 1440),
             ..monitor("WIDE", 0, 0, 0, 60)
         }]
     }
@@ -836,6 +866,57 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// `count` 1920×1080 logical screens side by side, shown at scale `density`.
+    fn row(count: i32, density: u32) -> Vec<MonitorInfo> {
+        let screen = |index: i32| MonitorInfo {
+            pixels: PixelSize::new(1920 * density, 1080 * density),
+            ..monitor(&format!("S-{index}"), index * 1920, 1920, 1080, 60)
+        };
+        (0..count).map(screen).collect()
+    }
+
+    #[test]
+    fn h264_too_wide_in_pixels_switches_to_av1() {
+        // 3834 logical px across, 7668 pixels.
+        let plan = planned(&Target::All, with_format(Format::H264), &row(2, 2));
+        assert_eq!(plan.join.expect("joined").codec, Codec::Av1);
+    }
+
+    #[test]
+    fn a_native_hidpi_recording_is_not_scaled() {
+        assert_eq!(
+            single(&planned(&Target::All, Settings::default(), &row(1, 2))).size,
+            None
+        );
+    }
+
+    #[test]
+    fn hidpi_screens_join_at_their_pixel_size() {
+        let joined = planned(&Target::All, Settings::default(), &row(2, 2)).join;
+        let plain = planned(&Target::All, Settings::default(), &row(2, 1)).join;
+        let (joined, plain) = (joined.expect("joined"), plain.expect("joined"));
+        assert_eq!(joined.size, (plain.size.0 * 2, plain.size.1 * 2));
+    }
+
+    #[test]
+    fn hidpi_parts_at_their_pixel_size_are_not_scaled() {
+        let plan = planned(&Target::All, Settings::default(), &row(2, 2));
+        assert_eq!(plan.parts[0].job.size, None);
+    }
+
+    #[test]
+    fn hidpi_screens_too_wide_in_pixels_are_scaled_to_fit() {
+        // 5754 logical px across, 11508 pixels.
+        let join = planned(&Target::All, Settings::default(), &row(3, 2)).join;
+        assert!(join.expect("joined").size.0 <= 8192);
+    }
+
+    #[test]
+    fn scaling_hidpi_screens_to_fit_is_told() {
+        let notes = planned(&Target::All, Settings::default(), &row(3, 2)).notes;
+        assert_eq!(notes.len(), 1);
     }
 
     #[test]

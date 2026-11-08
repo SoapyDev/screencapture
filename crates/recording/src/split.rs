@@ -125,6 +125,7 @@ impl Gaps {
 mod tests {
     use super::*;
     use crate::plan::BORDER;
+    use screencapture_core::capture::PixelSize;
 
     fn monitor(name: &str, x: i32) -> MonitorInfo {
         MonitorInfo {
@@ -132,6 +133,7 @@ mod tests {
             rect: Rect::new(x, 0, 2560, 1440),
             output_position: (x, 0),
             refresh_mhz: None,
+            pixels: PixelSize::new(2560, 1440),
         }
     }
 

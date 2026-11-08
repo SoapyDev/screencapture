@@ -22,9 +22,10 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use super::{
-    MonitorInfo, Rect, Shot,
+    MonitorInfo, PixelSize, Rect, Shot,
     pixels::{self, PixelFormat, Transform},
 };
+use crate::units::unsigned;
 
 #[derive(Default)]
 struct Output {
@@ -43,22 +44,35 @@ impl Output {
     fn info(&self, index: usize) -> MonitorInfo {
         let (x, y) = self.logical_position.unwrap_or(self.position);
         let (w, h) = self.logical_size.unwrap_or_else(|| {
-            let (w, h) = self.mode_size;
-            let (w, h) = match self.transform {
-                Transform::Rotate90 | Transform::Rotate270 | Transform::Flipped90 | Transform::Flipped270 => {
-                    (h, w)
-                }
-                _ => (w, h),
-            };
+            let (w, h) = self.upright_mode_size();
             let scale = self.scale.max(1);
             (w / scale, h / scale)
         });
+        let rect = Rect::new(x, y, w, h);
         MonitorInfo {
             name: self.name.clone().unwrap_or_else(|| format!("output-{index}")),
-            rect: Rect::new(x, y, w, h),
+            rect,
             output_position: self.position,
             refresh_mhz: u32::try_from(self.refresh).ok().filter(|&r| r > 0),
+            pixels: self.pixels().unwrap_or_else(|| PixelSize::of(rect)),
         }
+    }
+
+    /// The mode's size, turned the way the output shows it.
+    const fn upright_mode_size(&self) -> (i32, i32) {
+        let (w, h) = self.mode_size;
+        match self.transform {
+            Transform::Rotate90 | Transform::Rotate270 | Transform::Flipped90 | Transform::Flipped270 => {
+                (h, w)
+            }
+            _ => (w, h),
+        }
+    }
+
+    /// The upright size in pixels, once the compositor told the mode.
+    fn pixels(&self) -> Option<PixelSize> {
+        let (w, h) = self.upright_mode_size();
+        (w > 0 && h > 0).then(|| PixelSize::new(unsigned(w), unsigned(h)))
     }
 }
 
@@ -714,6 +728,37 @@ wayland_client::delegate_noop!(State: ZwlrScreencopyManagerV1);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 2560×1440 logical output shown at scale 2.
+    fn hidpi_output(transform: Transform) -> Output {
+        Output {
+            mode_size: (5120, 2880),
+            scale: 2,
+            transform,
+            ..Output::default()
+        }
+    }
+
+    #[test]
+    fn an_output_knows_its_size_in_pixels() {
+        let info = hidpi_output(Transform::Normal).info(0);
+        assert_eq!(info.pixels, PixelSize::new(5120, 2880));
+    }
+
+    #[test]
+    fn a_turned_output_is_measured_upright() {
+        let info = hidpi_output(Transform::Rotate90).info(0);
+        assert_eq!(info.pixels, PixelSize::new(2880, 5120));
+    }
+
+    #[test]
+    fn an_output_without_a_mode_counts_its_logical_size() {
+        let output = Output {
+            logical_size: Some((1920, 1080)),
+            ..Output::default()
+        };
+        assert_eq!(output.info(0).pixels, PixelSize::new(1920, 1080));
+    }
 
     #[test]
     fn shared_memory_is_the_size_asked() {
