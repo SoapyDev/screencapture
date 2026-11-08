@@ -18,6 +18,8 @@ pub mod folder;
 pub mod gate;
 pub mod layout;
 mod look;
+pub mod motion;
+pub mod navigation;
 #[cfg(unix)]
 pub mod service;
 pub mod theme;
@@ -636,9 +638,11 @@ impl Overlay {
             self.drawers.toggle_next(Instant::now());
             self.drawers_changed(cx);
         }
-        // Last feature first: a recording the test starts wins over a capture "clicked" while
-        // the bars slide away, whatever order the buttons are shown in.
-        for index in (0..self.features.len()).rev() {
+        // The first feature (the drawings) acts first, so what is drawn is kept; then the last
+        // first: a recording the test starts wins over a capture "clicked" while the bars slide
+        // away, whatever order the buttons are shown in.
+        let count = self.features.len();
+        for index in std::iter::once(0).chain((1..count).rev()).take(count) {
             if let Some(effect) = self.features[index].test_hook(region) {
                 self.apply(index, effect, cx);
             }
@@ -748,7 +752,7 @@ impl Overlay {
         self.phase = Phase::Leaving;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(actions::SLIDE).await;
+            cx.background_executor().timer(motion::slide()).await;
             let _ = this.update(cx, |o, cx| o.take_over(start, cx));
         })
         .detach();
@@ -898,15 +902,22 @@ impl Overlay {
 
     /// A key while selecting: the features first (a text box takes every key), then the
     /// overlay's own.
-    fn key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+    /// What is left for the window to do (move the focus), if the key asked for it.
+    fn key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> Option<navigation::Navigation> {
         if !self.selecting() {
-            return;
+            return None;
         }
         if let Some((index, effect)) = self.feature_key(keystroke) {
             self.apply(index, effect, cx);
-            return;
+            return None;
         }
-        self.own_key(keystroke, cx);
+        let asked = navigation::navigation(keystroke);
+        match asked {
+            Some(navigation::Navigation::ToggleOptions) => self.toggle_next_drawer(cx),
+            Some(_) => return asked,
+            None => self.own_key(keystroke, cx),
+        }
+        None
     }
 
     fn feature_key(&mut self, keystroke: &Keystroke) -> Option<(usize, Effect)> {
@@ -920,7 +931,6 @@ impl Overlay {
     fn own_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         match keystroke.key.as_str() {
             "escape" => self.escape(cx),
-            "tab" => self.toggle_next_drawer(cx),
             "a" => self.select_all(cx),
             "r" => self.set_mode(Mode::Region, cx),
             "s" => self.set_mode(Mode::Screens, cx),
@@ -1160,8 +1170,21 @@ impl View {
         }
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.overlay.update(cx, |o, cx| o.key(&event.keystroke, cx));
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        if navigation::presses_focused_button(key) && self.button_has_focus(window, cx) {
+            return;
+        }
+        match self.overlay.update(cx, |o, cx| o.key(key, cx)) {
+            Some(navigation::Navigation::FocusNext) => window.focus_next(cx),
+            Some(navigation::Navigation::FocusPrevious) => window.focus_prev(cx),
+            _ => {}
+        }
+    }
+
+    /// A button, not the overlay itself, has the keyboard focus: it takes Enter and Space.
+    fn button_has_focus(&self, window: &Window, cx: &App) -> bool {
+        window.focused(cx).is_some_and(|focused| focused != self.focus)
     }
 
     fn on_press(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1218,7 +1241,7 @@ const DIM: Hsla = Hsla {
     a: 0.45,
 };
 /// Side of the square resize handles, in logical px.
-const HANDLE: i32 = 8;
+const HANDLE: i32 = 10;
 
 #[must_use]
 pub fn rect_div(r: Rect) -> Div {

@@ -43,7 +43,7 @@ pub enum Hit {
 /// Drags smaller than this (logical px) on either axis count as a click.
 pub const CLICK_SLOP: i32 = 4;
 /// How close to an edge (logical px, either side) a press grabs it.
-pub const HANDLE_SLOP: i32 = 8;
+pub const HANDLE_SLOP: i32 = 12;
 
 #[derive(Clone, Copy, Debug)]
 enum Drag {
@@ -366,10 +366,16 @@ impl Side {
     /// Where `v` is between edges `lo` and `hi`; the closer edge wins when they are less than
     /// two slops apart.
     const fn of(v: i32, lo: i32, hi: i32) -> Self {
+        // Never more than a third of the span, so a small region keeps a middle to grab.
+        let reach = if (hi - lo) / 3 < HANDLE_SLOP {
+            (hi - lo) / 3
+        } else {
+            HANDLE_SLOP
+        };
         let (to_lo, to_hi) = ((v - lo).abs(), (v - hi).abs());
-        if to_lo <= HANDLE_SLOP && to_lo <= to_hi {
+        if to_lo <= reach && to_lo <= to_hi {
             Self::Start
-        } else if to_hi <= HANDLE_SLOP {
+        } else if to_hi <= reach {
             Self::End
         } else {
             Self::Between
@@ -484,6 +490,15 @@ mod tests {
         assert_eq!(s.hit(40, 20), Hit::Inside);
         assert_eq!(s.hit(90, 45), Hit::Outside);
         assert_eq!(Selection::new(Mode::Region, monitors()).hit(40, 20), Hit::Outside);
+    }
+
+    #[test]
+    fn a_big_region_has_handles_a_finger_wide() {
+        let mut s = Selection::new(Mode::Region, monitors());
+        s.press(10, 5);
+        s.release(190, 45);
+        // 12 px outside the left edge: still the west handle (a 24 px target).
+        assert_eq!(s.hit(-2, 25), Hit::Handle(Handle::W));
     }
 
     #[test]

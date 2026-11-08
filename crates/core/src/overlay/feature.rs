@@ -141,7 +141,7 @@ pub trait Feature: Any {
         None
     }
 
-    /// Whether its action button has a drawer, which the toggle key (Tab) steps through.
+    /// Whether its action button has a drawer, which the toggle key (D) steps through.
     fn has_drawer(&self) -> bool {
         false
     }

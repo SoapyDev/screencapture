@@ -44,6 +44,11 @@ fn shell(id: impl Into<SharedString>, active: bool) -> Stateful<Div> {
         .px_3()
         .py_1()
         .rounded_md()
+        .border_2()
+        .border_color(gpui::transparent_black())
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|ring| ring.border_color(theme.on_surface))
         .cursor(CursorStyle::PointingHand)
         .when_else(
             active,
@@ -87,6 +92,9 @@ pub fn round_button(
         .bg(fill)
         .border_2()
         .border_color(theme.border)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|ring| ring.border_color(theme.on_surface))
         .hover(|d| d.border_color(theme.accent))
         .cursor(CursorStyle::PointingHand)
         .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())

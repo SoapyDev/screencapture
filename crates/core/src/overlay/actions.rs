@@ -3,7 +3,7 @@
 //! Resting the pointer on a button opens a bar of its options above it. The bars slide away
 //! with the toolbar when a feature takes over.
 
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc};
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Div, Entity, MouseButton, MouseDownEvent,
@@ -23,8 +23,6 @@ use crate::{
     units::{ToF32, saturating_i32},
 };
 
-/// How long the bars take to slide off the screens when a recording starts.
-pub const SLIDE: Duration = Duration::from_millis(150);
 /// Distance of the bars from their screen edge.
 pub const EDGE_GAP: f32 = 24.;
 /// Room the action bar takes at the bottom: a toolbar at the bottom sits above it.
@@ -135,7 +133,7 @@ impl ActionBar<'_> {
             .children(options)
             .with_animation(
                 ("drawer-in", index),
-                Animation::new(SLIDE).with_easing(ease_in_out),
+                Animation::new(super::motion::slide()).with_easing(ease_in_out),
                 |bar, delta| bar.opacity(delta).relative().top(px(RISE * (1. - delta))),
             );
         let sideways = div().relative().left(px(placement.shift.to_f32())).child(bar);
@@ -200,7 +198,7 @@ pub fn slide(place: Div, edge: Edge, offset: f32, leaving: bool, id: &'static st
     if !leaving {
         return at(place, 0.).into_any_element();
     }
-    let animation = Animation::new(SLIDE).with_easing(ease_in_out);
+    let animation = Animation::new(super::motion::slide()).with_easing(ease_in_out);
     let animated = at(place, 0.).with_animation(id, animation, move |place, delta| {
         at(place, SLIDE_DISTANCE * delta)
     });

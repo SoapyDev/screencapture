@@ -9,7 +9,7 @@ use gpui::{
     ease_in_out, prelude::*, px,
 };
 
-use screencapture_core::overlay::{actions, panel, separator, theme, widgets};
+use screencapture_core::overlay::{motion, panel, separator, theme, widgets};
 
 use super::{
     drawer::{self, Change, Drawer},
@@ -176,7 +176,7 @@ impl DrawerView {
 
 impl Render for DrawerView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let slide_in = Animation::new(actions::SLIDE).with_easing(ease_in_out);
+        let slide_in = Animation::new(motion::slide()).with_easing(ease_in_out);
         let panel = self
             .panel(cx)
             .with_animation("drawer-in", slide_in, |panel, delta| {
