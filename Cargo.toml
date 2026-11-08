@@ -53,17 +53,6 @@ tempfile = "3.27.0"
 unwrap_used = "warn"
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
-cast_precision_loss = "allow"
-cast_possible_wrap = "allow"
-# Colours read better as plain 0xRRGGBBAA; gpui render functions are naturally long.
-unreadable_literal = "allow"
-too_many_lines = "allow"
-many_single_char_names = "allow"
-# The crates are internal (one program), not a published API: no `# Errors` / `# Panics` sections.
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
 
 [package]
 name = "screencapture"

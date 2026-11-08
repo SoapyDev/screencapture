@@ -4,18 +4,19 @@ use anyhow::{Context, Result};
 use xcap::Monitor;
 
 use super::{MonitorInfo, Rect, Shot};
+use crate::units::{saturating_u32, signed};
 
 fn info(monitor: &Monitor) -> Result<MonitorInfo> {
     let (x, y) = (monitor.x()?, monitor.y()?);
     Ok(MonitorInfo {
         name: monitor.name()?,
-        rect: Rect::new(x, y, monitor.width()? as i32, monitor.height()? as i32),
+        rect: Rect::new(x, y, signed(monitor.width()?), signed(monitor.height()?)),
         output_position: (x, y),
         refresh_mhz: monitor
             .frequency()
             .ok()
-            .map(|hz| (hz * 1000.).round() as u32)
-            .filter(|&r| r > 0),
+            .map(|hz| saturating_u32((hz * 1000.).round()))
+            .filter(|&millihertz| millihertz > 0),
     })
 }
 

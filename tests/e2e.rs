@@ -40,11 +40,11 @@ fn desktop() -> std::sync::MutexGuard<'static, ()> {
 
 fn mean_brightness(path: &Path) -> f64 {
     let img = image::open(path).unwrap().to_rgba8();
-    let sum: u64 = img
+    let sum: f64 = img
         .pixels()
-        .map(|p| u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2]))
+        .map(|p| f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2]))
         .sum();
-    sum as f64 / f64::from(img.width() * img.height() * 3)
+    sum / f64::from(img.width() * img.height() * 3)
 }
 
 fn saved_path(out: &std::process::Output) -> std::path::PathBuf {

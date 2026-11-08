@@ -106,8 +106,10 @@ impl Pointer {
 
     /// From `from` to `to` in small moves.
     pub fn glide(&mut self, from: Spot, to: Spot) {
-        let along =
-            |a: u32, b: u32, i: i64| (i64::from(a) + (i64::from(b) - i64::from(a)) * i / GLIDE_STEPS) as u32;
+        let along = |start: u32, end: u32, step: i64| {
+            let offset = (i64::from(end) - i64::from(start)) * step / GLIDE_STEPS;
+            u32::try_from(i64::from(start) + offset).expect("a point between two u32s is a u32")
+        };
         for i in 0..=GLIDE_STEPS {
             self.jump(Spot {
                 x: along(from.x, to.x, i),

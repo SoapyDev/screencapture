@@ -64,7 +64,9 @@ recording work).
 15. **Run cargo's tools before every commit:** `cargo fmt --all`, `cargo clippy --workspace
     --all-targets` (also with `--no-default-features --features x11,capture,editing,recording`,
     and with each of `capture`, `editing`, `recording` left out) and `cargo test --workspace`,
-    all clean.
+    all clean. Clippy's `pedantic` and `nursery` groups are on for every crate, with no lint
+    allowed workspace-wide: a real exception is an `#[expect(lint, reason = "…")]` on the one
+    item it covers (number conversions go through core's `units`, which states each limit once).
     *Spirit:* nothing is committed that the toolchain could have flagged, on any build.
 
 16. **Limit repetition within a slice.** When the same thing appears more than twice within one
