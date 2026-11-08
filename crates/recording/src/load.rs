@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use screencapture_core::units::ToF32;
+
 /// Cumulative CPU time from `/proc/stat`, in ticks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuTimes {
@@ -32,7 +34,7 @@ pub fn parse_proc_stat(text: &str) -> Option<CpuTimes> {
 pub fn cpu_load(before: CpuTimes, after: CpuTimes) -> Option<f32> {
     let total = after.total.checked_sub(before.total).filter(|&t| t > 0)?;
     let busy = after.busy.saturating_sub(before.busy);
-    Some((busy as f32 / total as f32).clamp(0., 1.))
+    Some((busy.to_f32() / total.to_f32()).clamp(0., 1.))
 }
 
 /// `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits`: one percentage per

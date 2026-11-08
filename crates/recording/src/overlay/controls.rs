@@ -200,12 +200,12 @@ impl DrawerView {
         let stop = command_button(&self.controls, "stop", "■ Stop", Command::Stop);
         let discard = command_button(&self.controls, "discard", "✕ Discard", Command::Discard);
         panel()
-            .child(div().size(px(10.)).rounded_full().bg(rgba(0xff4d4dff)))
+            .child(div().size(px(10.)).rounded_full().bg(rgba(0xff4d_4dff)))
             .child(div().px_2().child(clock))
             .child(
                 div()
                     .px_2()
-                    .text_color(rgba(0xffffffa0))
+                    .text_color(rgba(0xffff_ffa0))
                     .child(controls.summary.clone()),
             )
             .child(separator())

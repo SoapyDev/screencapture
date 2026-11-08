@@ -22,6 +22,15 @@ pub struct Session {
 
 impl Session {
     /// Start every recorder of `plan`, at once, into a new file in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// When the file can't be created in `dir`, or a recorder won't start (the others are then
+    /// cancelled).
+    ///
+    /// # Panics
+    ///
+    /// Never: a plan has a part per screen, at least one.
     pub fn start(
         backend: &Backend,
         plan: Plan,
@@ -82,6 +91,14 @@ impl Session {
     }
 
     /// Stop every recorder: what is left to do before the file is ready.
+    ///
+    /// # Errors
+    ///
+    /// When a recorder left no video; for several screens, every part is then removed.
+    ///
+    /// # Panics
+    ///
+    /// Never: a session has a recorder.
     pub fn stop(self) -> Result<Finishing> {
         let Some(plan) = self.join else {
             let (active, _) = self.parts.into_iter().next().expect("a session has a recorder");
@@ -116,6 +133,11 @@ pub enum Finishing {
 
 impl Finishing {
     /// Do what is left: the file's path.
+    ///
+    /// # Errors
+    ///
+    /// When joining the screens fails (their videos are then kept, and the error says where), or
+    /// the GIF can't be made.
     pub fn finish(self) -> Result<PathBuf> {
         match self {
             Self::Done(path) => Ok(path),

@@ -50,7 +50,8 @@ mod view {
     use super::{Shown, Spec};
     use screencapture_core::{
         capture::{MonitorInfo, Rect},
-        overlay::layout,
+        overlay::{layout, rect_div},
+        units::{ToF32, saturating_i32},
     };
 
     use crate::{
@@ -91,7 +92,10 @@ mod view {
     pub fn display_of(screen: &MonitorInfo, monitors: &[MonitorInfo], cx: &App) -> Option<DisplayId> {
         let shows_screen = |display: &std::rc::Rc<dyn gpui::PlatformDisplay>| {
             let origin = display.bounds().origin;
-            let origin = (f32::from(origin.x) as i32, f32::from(origin.y) as i32);
+            let origin = (
+                saturating_i32(f32::from(origin.x)),
+                saturating_i32(f32::from(origin.y)),
+            );
             layout::match_display(origin, monitors).is_some_and(|i| monitors[i].name == screen.name)
         };
         cx.displays().iter().find(|d| shows_screen(d)).map(|d| d.id())
@@ -100,7 +104,7 @@ mod view {
     /// A layer surface over everything at `bounds` (desktop px) on `screen`, without keyboard
     /// focus.
     pub fn layer_options(bounds: Rect, screen: Rect, display: DisplayId) -> WindowOptions {
-        let window_size = size(px(bounds.w as f32), px(bounds.h as f32));
+        let window_size = size(px(bounds.w.to_f32()), px(bounds.h.to_f32()));
         WindowOptions {
             titlebar: None,
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(Point::default(), window_size))),
@@ -119,7 +123,10 @@ mod view {
     /// Top layer, placed from `screen`'s corner at `bounds`, not pushed aside by panels.
     fn layer_over_everything(bounds: Rect, screen: Rect) -> WindowKind {
         use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
-        let (top, left) = (px((bounds.y - screen.y) as f32), px((bounds.x - screen.x) as f32));
+        let (top, left) = (
+            px((bounds.y - screen.y).to_f32()),
+            px((bounds.x - screen.x).to_f32()),
+        );
         WindowKind::LayerShell(LayerShellOptions {
             namespace: "screencapture-recording".into(),
             layer: Layer::Overlay,
@@ -159,15 +166,7 @@ mod view {
 
     impl Render for FrameView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let strips = self.surface.strips.iter().map(|strip| {
-                div()
-                    .absolute()
-                    .left(px(strip.x as f32))
-                    .top(px(strip.y as f32))
-                    .w(px(strip.w as f32))
-                    .h(px(strip.h as f32))
-                    .bg(RED)
-            });
+            let strips = self.surface.strips.iter().map(|strip| rect_div(*strip).bg(RED));
             div()
                 .size_full()
                 .relative()

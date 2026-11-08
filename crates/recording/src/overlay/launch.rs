@@ -139,6 +139,10 @@ impl Work {
 }
 
 /// Run `work` (a recording in this process) with its frame on screen; returns what it returned.
+///
+/// # Panics
+///
+/// When `work` panicked: that panic is passed on.
 pub fn with_recording_frame<R: Send + 'static>(work: impl FnOnce(ShowFrame) -> R + Send + 'static) -> R {
     let result = Arc::new(Mutex::new(None));
     let slot = result.clone();

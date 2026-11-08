@@ -18,6 +18,10 @@ pub struct Part {
 /// The parts of `area` on `screens`, with room for the frame where no screen is beyond, even
 /// sizes, and slots that close the gaps between screens (like stitched screenshots). Also the
 /// joined video's size.
+///
+/// # Errors
+///
+/// When a part is too small to record once the frame has room.
 pub fn split(
     area: Rect,
     screens: &[&MonitorInfo],

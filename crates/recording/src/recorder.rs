@@ -33,6 +33,10 @@ fn which(program: &str) -> Option<PathBuf> {
 
 /// gpu-screen-recorder if installed, else wf-recorder. `SCREENCAPTURE_RECORDER=wf-recorder`
 /// forces the latter.
+///
+/// # Errors
+///
+/// When neither recorder is installed (or the one asked for isn't).
 pub fn find_backend() -> Result<Backend> {
     let gsr = || which("gpu-screen-recorder").map(Backend::Gsr);
     let wf = || which("wf-recorder").map(Backend::Wf);
@@ -126,6 +130,10 @@ impl Ready {
 
 impl Active {
     /// Record `job` into a new file in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// When the file can't be created in `dir`, or the recorder won't start.
     pub fn start(
         backend: &Backend,
         job: Job,
@@ -144,6 +152,10 @@ impl Active {
     }
 
     /// Record `job` (one screen of several) into `video`.
+    ///
+    /// # Errors
+    ///
+    /// When the recorder won't start.
     pub fn start_part(backend: &Backend, job: Job, video: PathBuf) -> Result<Self> {
         Self::launch(backend, job, video.clone(), video)
     }
@@ -267,6 +279,10 @@ impl Active {
     }
 
     /// Finish the file (and the GIF) and return its path.
+    ///
+    /// # Errors
+    ///
+    /// When the recorder left no video, or the GIF can't be made (the video is then kept).
     pub fn stop(mut self) -> Result<PathBuf> {
         self.finish_video()?;
         if self.job.gif {
@@ -276,6 +292,10 @@ impl Active {
     }
 
     /// Finish the file of one screen of several, and say when its first frame was taken.
+    ///
+    /// # Errors
+    ///
+    /// When the recorder left no video.
     pub fn stop_part(mut self) -> Result<Stopped> {
         let first_frame = self.finish_video()?;
         Ok(Stopped {
@@ -350,6 +370,10 @@ pub fn parse_first_frame(text: &str) -> Option<u64> {
 
 /// Run ffmpeg with `args`; `what` names the job in errors. In its own process group, like the
 /// recorders: a second Ctrl+C while the screens are joined must not cut the join short.
+///
+/// # Errors
+///
+/// When ffmpeg can't be run, or fails.
 pub fn ffmpeg(args: &[String], what: &str) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let ran = Command::new("ffmpeg")
@@ -369,6 +393,10 @@ pub fn ffmpeg(args: &[String], what: &str) -> Result<()> {
 }
 
 /// `video` as an animated GIF at `fps`; the video is removed once converted, kept otherwise.
+///
+/// # Errors
+///
+/// When ffmpeg fails; the video is kept, and the error says where.
 pub fn convert_to_gif(fps: u32, video: &Path, gif: &Path) -> Result<()> {
     if let Err(e) = ffmpeg(&plan::gif_args(fps, video, gif), "make the GIF") {
         let _ = std::fs::remove_file(gif);
@@ -383,6 +411,10 @@ pub fn convert_to_gif(fps: u32, video: &Path, gif: &Path) -> Result<()> {
 pub const FAKE_RECORDER: &str = r#"out="$1"; trap 'echo end >> "$out"; exit 0' INT; echo start > "$out"; echo "1 2" > "$out.ts"; while :; do sleep 0.01; done"#;
 
 /// Run `script` (see [`FAKE_RECORDER`]) as the recorder of `job`, in `dir`.
+///
+/// # Errors
+///
+/// When the file can't be created in `dir`, or the script won't start.
 #[cfg(test)]
 pub fn spawn_fake(dir: &Path, script: &str, job: Job) -> Result<Active> {
     let (path, _) = screencapture_core::naming::reserve(dir, "screencast", "mp4", chrono::Local::now())?;

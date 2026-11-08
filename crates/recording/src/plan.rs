@@ -5,7 +5,10 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use super::settings::{Audio, Format, Fps, Quality, Settings};
-use screencapture_core::capture::{MonitorInfo, Rect};
+use screencapture_core::{
+    capture::{MonitorInfo, Rect},
+    units::{saturating_i32, saturating_u32, unsigned},
+};
 
 /// Width of the red frame drawn around a recording, in logical px. It always sits outside the
 /// recorded area, so it is never in the video.
@@ -121,6 +124,10 @@ pub struct Join {
 }
 
 /// The desktop area `target` covers, on `monitors`.
+///
+/// # Errors
+///
+/// When a named screen doesn't exist, the region is on no screen, or there are no screens.
 pub fn area(target: &Target, monitors: &[MonitorInfo], focused: Option<&str>) -> Result<Rect> {
     let found = match target {
         Target::Focused => focused_screen(monitors, focused).map(|m| m.rect),
@@ -162,6 +169,10 @@ const MIN_SIDE: i32 = 16;
 
 /// `area` shrunk where the border would not fit on any screen, and to even sizes (encoders
 /// need them). (Recordings go through [`super::split`]; this is the one-piece case.)
+///
+/// # Errors
+///
+/// When what is left is too small to record.
 #[cfg(test)]
 pub fn inset(area: Rect, monitors: &[MonitorInfo]) -> Result<Rect> {
     let room = room_for_border(area, monitors);
@@ -189,6 +200,10 @@ pub fn room_for_border(area: Rect, monitors: &[MonitorInfo]) -> Rect {
 }
 
 /// `rect`, if big enough to be worth recording.
+///
+/// # Errors
+///
+/// When a side is shorter than the smallest recordable.
 pub fn ensure_recordable(rect: Rect) -> Result<Rect> {
     if rect.w < MIN_SIDE || rect.h < MIN_SIDE {
         bail!("the area is too small to record");
@@ -222,8 +237,8 @@ pub fn adaptive_tier(load: f32) -> u32 {
 }
 
 /// Nearest even size, at least 2.
-fn even(v: f64) -> u32 {
-    ((v / 2.).round() as u32 * 2).max(2)
+fn even(length: f64) -> u32 {
+    (saturating_u32((length / 2.).round()) * 2).max(2)
 }
 
 /// `(w, h)` scaled by `factor`, to even sizes.
@@ -249,6 +264,10 @@ fn part_jobs(
 }
 
 /// The plan for recording `target`.
+///
+/// # Errors
+///
+/// When `target` covers no screen, or what it covers is too small to record.
 pub fn plan(
     target: &Target,
     settings: Settings,
@@ -318,7 +337,7 @@ struct Video {
 
 impl Video {
     fn fitted(joined: (i32, i32), settings: Settings) -> Self {
-        let native = (joined.0 as u32, joined.1 as u32);
+        let native = (unsigned(joined.0), unsigned(joined.1));
         let gif = settings.format == Format::Gif;
         let wanted = capped_size(native, settings);
         let (codec, size, notes) = within_codec_limits(wanted, first_codec(settings.format));
@@ -339,7 +358,7 @@ impl Video {
             return logical;
         }
         // Not `even`: positions can be 0.
-        ((f64::from(logical) * self.scale / 2.).round() * 2.) as i32
+        saturating_i32((f64::from(logical) * self.scale / 2.).round() * 2.)
     }
 
     /// Where a part lands in the joined video.
@@ -363,7 +382,7 @@ impl Video {
             area: part.area,
             fps: if self.gif { rate.0.min(GIF_FPS) } else { rate.0 },
             variable: rate.1,
-            size: (!native).then_some((slot.w as u32, slot.h as u32)),
+            size: (!native).then_some((unsigned(slot.w), unsigned(slot.h))),
             codec: self.codec,
             // Joining encodes again: record finer so the result keeps the chosen quality.
             quality: if role.several {
@@ -380,8 +399,8 @@ impl Video {
     fn join(&self, settings: Settings, fps: u32) -> Join {
         Join {
             size: (
-                self.length(self.joined.0) as u32,
-                self.length(self.joined.1) as u32,
+                unsigned(self.length(self.joined.0)),
+                unsigned(self.length(self.joined.1)),
             ),
             codec: self.codec,
             quality: settings.quality,
@@ -918,7 +937,7 @@ mod tests {
     fn scaled_parts_fill_their_slots_exactly() {
         let plan = planned(&Target::All, at_720p(), &three());
         let slot = plan.parts[0].slot;
-        assert_eq!(plan.parts[0].job.size, Some((slot.w as u32, slot.h as u32)));
+        assert_eq!(plan.parts[0].job.size, Some((unsigned(slot.w), unsigned(slot.h))));
     }
 
     #[test]

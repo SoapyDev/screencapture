@@ -32,12 +32,22 @@ pub enum Outcome {
 
 /// The world a recording starts in.
 pub trait Env {
+    /// The screens there are.
+    ///
+    /// # Errors
+    ///
+    /// When the display server can't be reached or won't list its screens.
     fn monitors(&mut self) -> Result<Vec<MonitorInfo>>;
     fn focused(&mut self) -> Option<String>;
     /// Remembered settings and the folder to record into.
     fn settings(&mut self) -> (Settings, PathBuf);
     /// Busier of CPU and GPU (0..=1); only asked for the Adaptive frame rate.
     fn load(&mut self) -> Option<f32>;
+    /// Start recording `plan` into `dir`.
+    ///
+    /// # Errors
+    ///
+    /// When no recorder is installed, the file can't be created, or a recorder won't start.
     fn start(&mut self, plan: Plan, dir: &Path) -> Result<Session>;
 }
 

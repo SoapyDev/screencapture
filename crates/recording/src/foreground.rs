@@ -20,6 +20,10 @@ use screencapture_core::daemon::{self, Client, Reply, Request};
 pub type ShowFrame<'a> = &'a mut dyn FnMut(Option<&super::OnScreen>);
 
 /// Record `command` (a start), in this process, until told to stop. Prints how to stop it.
+///
+/// # Errors
+///
+/// When another process holds `socket`, or the stop signals can't be caught.
 pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Result<Outcome> {
     let listener = daemon::bind(socket)?;
     let stop = stop_on_signals()?;
