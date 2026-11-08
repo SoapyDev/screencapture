@@ -21,6 +21,9 @@ fn bin() -> Command {
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap();
     let display = std::env::var("WAYLAND_DISPLAY").unwrap();
     cmd.env("WAYLAND_DISPLAY", Path::new(&runtime).join(display));
+    // The sound server too (recordings with sound), found by absolute path.
+    cmd.env("PULSE_SERVER", format!("unix:{runtime}/pulse/native"));
+    cmd.env("PIPEWIRE_RUNTIME_DIR", &runtime);
     cmd.env("XDG_RUNTIME_DIR", tempfile::tempdir().unwrap().keep());
     cmd.env("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().keep());
     cmd.env_remove("HYPRLAND_INSTANCE_SIGNATURE");
@@ -357,13 +360,13 @@ mod drawer {
     use super::*;
 
     /// A screen as `screencapture list` prints it (`name<TAB>x,y WxH`).
-    struct Screen {
-        name: String,
-        x: u32,
-        width: u32,
+    pub struct Screen {
+        pub name: String,
+        pub x: u32,
+        pub width: u32,
     }
 
-    fn screens() -> Vec<Screen> {
+    pub fn screens() -> Vec<Screen> {
         let listed = bin().arg("list").output().expect("the binary under test runs");
         let text = String::from_utf8(listed.stdout).expect("screen names are text");
         text.lines().filter_map(parse_screen).collect()
@@ -382,7 +385,7 @@ mod drawer {
     }
 
     /// The desktop's extent, for absolute pointer moves.
-    fn layout() -> (u32, u32) {
+    pub fn layout() -> (u32, u32) {
         let right = screens()
             .iter()
             .map(|s| s.x + s.width)
@@ -461,5 +464,157 @@ mod drawer {
                 .count(),
             0
         );
+    }
+}
+
+/// Every way in (command line, daemon, foreground) and every recording format, once each.
+#[cfg(feature = "wayland")]
+mod ways_in {
+    use super::*;
+
+    /// A daemon in `session`, killed when dropped.
+    struct Daemon(std::process::Child);
+
+    impl Daemon {
+        fn start(session: &Session) -> Self {
+            let daemon = session.command().arg("daemon").spawn();
+            let daemon = Self(daemon.expect("the binary under test runs"));
+            assert!(session.recording_soon(), "the daemon did not start");
+            daemon
+        }
+    }
+
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// `args` run in `session`, to the end.
+    fn run(session: &Session, args: &[&str]) -> Output {
+        session
+            .command()
+            .args(args)
+            .output()
+            .expect("the binary under test runs")
+    }
+
+    fn image_size(path: &Path) -> (u32, u32) {
+        image::image_dimensions(path).expect("the screenshot is a PNG")
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session"]
+    fn list_names_every_screen_it_can_capture() {
+        let _desktop = desktop();
+        let listed = bin().arg("list").output().expect("the binary under test runs");
+        let lines = String::from_utf8_lossy(&listed.stdout).lines().count();
+        assert_eq!(drawer::screens().len(), lines);
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session"]
+    fn all_captures_the_whole_desktop_without_ui() {
+        let _desktop = desktop();
+        let dir = fresh_dir();
+        let saved = saved_path(
+            &bin()
+                .args(["all", "-o"])
+                .arg(&dir)
+                .output()
+                .expect("the binary under test runs"),
+        );
+        assert_eq!(image_size(&saved).0, drawer::layout().0);
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session"]
+    fn a_named_screen_is_captured_alone() {
+        let _desktop = desktop();
+        let screen = drawer::screens().into_iter().next().expect("at least one screen");
+        let dir = fresh_dir();
+        let out = bin().args(["screen", &screen.name, "-o"]).arg(&dir).output();
+        let saved = saved_path(&out.expect("the binary under test runs"));
+        assert_eq!(image_size(&saved).0, screen.width);
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session and gpu-screen-recorder; records through a daemon"]
+    fn recording_through_the_daemon_saves_a_video() {
+        let _desktop = desktop();
+        let session = Session::new();
+        let _daemon = Daemon::start(&session);
+        assert!(
+            run(&session, &["record", "region", "-g", GEOMETRY])
+                .status
+                .success()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let video = saved_path(&run(&session, &["record", "stop"]));
+        assert_eq!(last_frame(&video).dimensions(), (640, 360));
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session and gpu-screen-recorder; records through a daemon"]
+    fn toggle_starts_then_stops_a_recording() {
+        let _desktop = desktop();
+        let session = Session::new();
+        let _daemon = Daemon::start(&session);
+        assert!(run(&session, &["record", "toggle"]).status.success());
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let video = saved_path(&run(&session, &["record", "toggle"]));
+        assert!(video.exists(), "{} was not saved", video.display());
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session"]
+    fn discarding_with_nothing_recorded_says_so() {
+        let _desktop = desktop();
+        let out = run(&Session::new(), &["record", "discard"]);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("no recording is running"), "said: {said}");
+    }
+
+    /// Record `GEOMETRY` in the foreground with `settings`, then stop: the file.
+    fn record_with(settings: &[&str]) -> std::path::PathBuf {
+        let session = Session::new();
+        let mut recording = session.command();
+        recording
+            .args(["record", "region", "-g", GEOMETRY])
+            .args(settings);
+        let recording = recording.stdout(std::process::Stdio::piped()).spawn();
+        let (stopped, _) = session.stop_once_recorded(recording.expect("the binary under test runs"));
+        saved_path(&stopped)
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session, gpu-screen-recorder and ffmpeg; records a GIF"]
+    fn a_gif_recording_is_a_gif() {
+        let _desktop = desktop();
+        let gif = std::fs::read(record_with(&["--format", "gif"])).expect("the GIF was saved");
+        assert!(gif.starts_with(b"GIF8"), "not a GIF");
+    }
+
+    #[test]
+    #[ignore = "needs a graphical session, gpu-screen-recorder, ffprobe and a sound server"]
+    fn sound_is_recorded_when_asked() {
+        let _desktop = desktop();
+        let video = record_with(&["--audio", "output"]);
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&video)
+            .output()
+            .expect("ffprobe is installed for these tests");
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "audio");
     }
 }
