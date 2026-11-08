@@ -10,8 +10,11 @@ use gpui::{Hsla, WindowAppearance, black, hsla, rgba, white};
 pub mod choice;
 pub mod contrast;
 pub mod css;
+pub mod desktop;
 pub mod gtk;
 pub mod kde;
+#[cfg(target_os = "linux")]
+pub mod portal;
 pub mod roles;
 
 use contrast::{made_readable_on, readable_on};

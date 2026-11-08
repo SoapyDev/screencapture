@@ -15,6 +15,7 @@ pub mod folder;
 #[cfg(unix)]
 pub mod gate;
 pub mod layout;
+mod look;
 #[cfg(unix)]
 pub mod service;
 pub mod theme;
@@ -444,14 +445,8 @@ fn run_test_hooks(overlay: &Entity<Overlay>, cx: &App) {
     .detach();
 }
 
-/// Paint the bars in the desktop's light or dark, from now on.
-fn follow_desktop_scheme(cx: &App) {
-    let scheme = theme::Scheme::from(cx.window_appearance());
-    theme::set_current(theme::ChromeTheme::built_in(scheme));
-}
-
 fn open_windows(overlay: &Entity<Overlay>, cx: &mut App) {
-    follow_desktop_scheme(cx);
+    look::follow_desktop(overlay, cx);
     let mut displays = displays_by_pointer(overlay.read(cx), cx).into_iter();
     // Open the first synchronously, the rest after yielding to the event loop, so the compositor
     // can configure and show the first surface without waiting for the others (~15 ms each).

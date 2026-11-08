@@ -21,11 +21,32 @@ pub enum ThemeMode {
     Light,
 }
 
+/// Where the colours come from, for a user whose machine has several answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeSource {
+    /// The desktop's own: KDE's settings on KDE, GTK's stylesheet elsewhere, then the portal.
+    #[default]
+    Auto,
+    /// Only the GTK stylesheets.
+    Gtk,
+    /// Only KDE's `kdeglobals`.
+    Kde,
+    /// Only the desktop portal's accent.
+    Portal,
+    /// Only the built-in colours.
+    BuiltIn,
+}
+
 /// The `theme` keys of the config file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeChoice {
     #[serde(default)]
     pub theme: ThemeMode,
+    /// Where the desktop's colours are read from. Read once when the program starts: a running
+    /// daemon needs a restart to follow a change.
+    #[serde(default)]
+    pub theme_source: ThemeSource,
     /// `#rrggbb`: the accent, instead of the desktop's.
     #[serde(default)]
     pub theme_accent: Option<String>,
@@ -179,6 +200,19 @@ mod tests {
         let choice: ThemeChoice = serde_json::from_str(r##"{"theme":"light","theme_accent":"#123456"}"##)
             .expect("the test's JSON is valid");
         assert_eq!(choice.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn the_source_is_read_from_config_keys() {
+        let choice: ThemeChoice =
+            serde_json::from_str(r#"{"theme_source":"builtin"}"#).expect("the test's JSON is valid");
+        assert_eq!(choice.theme_source, ThemeSource::BuiltIn);
+    }
+
+    #[test]
+    fn a_missing_source_key_is_auto() {
+        let choice: ThemeChoice = serde_json::from_str("{}").expect("the test's JSON is valid");
+        assert_eq!(choice.theme_source, ThemeSource::Auto);
     }
 
     #[test]

@@ -205,7 +205,7 @@ fn hex(text: &str) -> Option<Hsla> {
     Some(from_bytes(channel(0)?, channel(2)?, channel(4)?, alpha))
 }
 
-fn from_bytes(red: u8, green: u8, blue: u8, alpha: u8) -> Hsla {
+pub(super) fn from_bytes(red: u8, green: u8, blue: u8, alpha: u8) -> Hsla {
     let unit = |byte: u8| f32::from(byte) / 255.;
     Rgba {
         r: unit(red),

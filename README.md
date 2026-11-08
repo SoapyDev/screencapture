@@ -180,6 +180,21 @@ Hyprland binds, for example:
 hl.bind("SUPER + Print", hl.dsp.exec_cmd("/home/you/.local/bin/screencapture record toggle"))
 ```
 
+## Theme
+
+The overlay's bars follow the desktop's colours (the drawing colours are yours and never change).
+Light or dark follows the desktop live; the colours themselves are read once when the program
+starts, so **restart the daemon** after changing the theme or the keys below. Keys of
+`~/.config/screencapture/config.json`:
+
+| Key | Values (default first) |
+|---|---|
+| `theme` | `follow`, `dark`, `light` (a forced scheme keeps the desktop's accent) |
+| `theme_source` | `auto` (KDE's `kdeglobals` on KDE, else the GTK stylesheet, then the portal's accent), `gtk` (`~/.config/gtk-4.0/gtk.css` and its imports), `kde` (`kdeglobals`), `portal` (accent only), `builtin` |
+| `theme_accent` | `#rrggbb`, instead of the desktop's accent |
+
+Text and the active button are kept readable (4.5:1) whatever the desktop's colours are.
+
 ## Latency
 
 The time from trigger to on-screen overlay is what this tool optimises for.
