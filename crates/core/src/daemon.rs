@@ -151,11 +151,12 @@ pub fn socket_path() -> PathBuf {
         .join("screencapture.sock")
 }
 
-/// Ask a running daemon to show the overlay. `None` when no daemon listens at `path`.
+/// Ask a running daemon to show the overlay: what it came to, with what the user should hear
+/// about. `None` when no daemon listens at `path`.
 #[must_use]
-pub fn request(path: &Path, mode: Mode) -> Option<Result<Reply>> {
+pub fn request(path: &Path, mode: Mode) -> Option<Result<Answer>> {
     let overlay: Request<NoExtension> = Request::Overlay(mode);
-    send(path, &overlay).map(|answer| answer.map(|a| a.reply))
+    send(path, &overlay)
 }
 
 /// Hand `request` to a running daemon and wait for its answer. `None` when no daemon listens
@@ -200,6 +201,14 @@ impl Client {
 
     pub fn reply(mut self, reply: &Reply) {
         let _ = writeln!(self.stream, "{}", reply.encode());
+    }
+
+    /// Hand on `answer` (from another daemon request): its notes, then its reply.
+    pub fn pass_on(mut self, answer: &Answer) {
+        for note in &answer.notes {
+            self.note(note);
+        }
+        self.reply(&answer.reply);
     }
 }
 
@@ -455,6 +464,48 @@ mod tests {
         assert_eq!(notes, vec!["first".to_string(), "two lines".to_string()]);
     }
 
+    /// A daemon at `path` that answers every overlay request with `answer`, passed on.
+    fn passing_on(path: &Path, answer: Answer) {
+        let listener = bind(path).expect("a fresh folder can hold the socket");
+        std::thread::spawn(move || {
+            serve(
+                &listener,
+                None,
+                || {},
+                || None,
+                |pending: Pending<NoExtension>| pending.client.pass_on(&answer),
+            );
+        });
+    }
+
+    fn noted_answer() -> Answer {
+        Answer {
+            reply: Reply::Recording("/v/a.mp4".into()),
+            notes: vec!["scaled to 4096x768".into()],
+        }
+    }
+
+    #[test]
+    fn a_passed_on_answer_arrives_whole() {
+        let dir = tempfile::tempdir().expect("the system has a temporary folder");
+        let path = dir.path().join("run").join("d.sock");
+        passing_on(&path, noted_answer());
+        let answer = send(&path, &Request::<NoExtension>::Overlay(Mode::Region));
+        assert_eq!(
+            answer.expect("the daemon listens").expect("it answers"),
+            noted_answer()
+        );
+    }
+
+    #[test]
+    fn the_overlay_request_keeps_the_notes() {
+        let dir = tempfile::tempdir().expect("the system has a temporary folder");
+        let path = dir.path().join("run").join("d.sock");
+        passing_on(&path, noted_answer());
+        let answer = request(&path, Mode::Region).expect("the daemon listens");
+        assert_eq!(answer.expect("it answers").notes, noted_answer().notes);
+    }
+
     #[test]
     fn replies_round_trip() {
         for reply in [
@@ -497,10 +548,19 @@ mod tests {
             );
         });
         assert_eq!(
-            request(&path, Mode::Region).unwrap().unwrap(),
+            request(&path, Mode::Region)
+                .expect("the daemon listens")
+                .expect("it answers")
+                .reply,
             Reply::Saved("/x.png".into())
         );
-        assert_eq!(request(&path, Mode::Screens).unwrap().unwrap(), Reply::Cancelled);
+        assert_eq!(
+            request(&path, Mode::Screens)
+                .expect("the daemon listens")
+                .expect("it answers")
+                .reply,
+            Reply::Cancelled
+        );
     }
 
     #[test]
@@ -529,7 +589,14 @@ mod tests {
         });
         let _silent = UnixStream::connect(&path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || tx.send(request(&path, Mode::Region).unwrap().unwrap()));
+        std::thread::spawn(move || {
+            tx.send(
+                request(&path, Mode::Region)
+                    .expect("the daemon listens")
+                    .expect("it answers")
+                    .reply,
+            )
+        });
         let reply = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("second client served");
@@ -560,7 +627,13 @@ mod tests {
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(idled.load(Ordering::Relaxed), 1, "once, not every 50 ms");
-        assert_eq!(request(&path, Mode::Region).unwrap().unwrap(), Reply::Cancelled);
+        assert_eq!(
+            request(&path, Mode::Region)
+                .expect("the daemon listens")
+                .expect("it answers")
+                .reply,
+            Reply::Cancelled
+        );
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(idled.load(Ordering::Relaxed), 2, "again after the next request");
     }
@@ -595,7 +668,13 @@ mod tests {
             6,
             "5 timed wake-ups, then it waits for clients"
         );
-        assert_eq!(request(&path, Mode::Region).unwrap().unwrap(), Reply::Cancelled);
+        assert_eq!(
+            request(&path, Mode::Region)
+                .expect("the daemon listens")
+                .expect("it answers")
+                .reply,
+            Reply::Cancelled
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(ticks.load(Ordering::Relaxed), 7, "and once more after a request");
     }

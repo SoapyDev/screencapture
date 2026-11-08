@@ -175,8 +175,9 @@ mod tests {
             .to_path_buf();
         let client = std::thread::spawn(move || {
             let print = daemon::request(&socket, screencapture_core::selection::Mode::Region)
-                .unwrap()
-                .unwrap();
+                .expect("this process answers on the socket")
+                .expect("it answers")
+                .reply;
             let start = daemon::send(
                 &socket,
                 &Request::Feature(Command::Start(Target::All, Overrides::default())),

@@ -130,9 +130,9 @@ fn remember_dir(plan: &Plan, dir: std::path::PathBuf) -> anyhow::Result<()> {
 /// Hand the request to a running daemon (instant), or run the overlay in this process.
 fn overlay_mode(mode: selection::Mode) -> ExitCode {
     #[cfg(unix)]
-    if let Some(reply) = daemon::request(&daemon::socket_path(), mode) {
+    if let Some(answer) = daemon::request(&daemon::socket_path(), mode) {
         trace("daemon replied");
-        return report_overlay(reply);
+        return report_overlay(answer);
     }
     // Freeze the screens now, overlapping gpui start-up.
     let frozen = std::thread::spawn(overlay::freeze);
@@ -143,9 +143,24 @@ fn overlay_mode(mode: selection::Mode) -> ExitCode {
     }
 }
 
-/// What the daemon's overlay came to.
+/// What the daemon's overlay came to, after what the user should hear about.
 #[cfg(unix)]
-fn report_overlay(reply: anyhow::Result<daemon::Reply>) -> ExitCode {
+fn report_overlay(answer: anyhow::Result<daemon::Answer>) -> ExitCode {
+    report_overlay_reply(answer.map(told_notes))
+}
+
+/// `answer`'s reply, once its notes are on stderr.
+#[cfg(unix)]
+fn told_notes(answer: daemon::Answer) -> daemon::Reply {
+    for note in &answer.notes {
+        eprintln!("screencapture: {note}");
+    }
+    answer.reply
+}
+
+/// What the daemon's overlay replied.
+#[cfg(unix)]
+fn report_overlay_reply(reply: anyhow::Result<daemon::Reply>) -> ExitCode {
     use daemon::Reply;
     match reply {
         Ok(Reply::Saved(path)) => {

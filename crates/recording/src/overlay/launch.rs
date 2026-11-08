@@ -77,22 +77,27 @@ pub fn through_daemon(
         let answer = cx
             .background_spawn(async move { daemon::send(&daemon::socket_path(), &request) })
             .await;
-        let reply = reply_of(answer);
-        if !matches!(reply, Reply::Recording(_)) {
+        let answer = answer_of(answer);
+        if !matches!(answer.reply, Reply::Recording(_)) {
             cx.update(take_drawings);
         }
+        // The notes too: what the recording had to adjust.
         if let Some(client) = client {
-            client.reply(&reply);
+            client.pass_on(&answer);
         }
     })
     .detach();
 }
 
-fn reply_of(answer: Option<anyhow::Result<daemon::Answer>>) -> Reply {
+fn answer_of(answer: Option<anyhow::Result<daemon::Answer>>) -> daemon::Answer {
+    let failed = |message: String| daemon::Answer {
+        reply: Reply::Error(message),
+        notes: Vec::new(),
+    };
     match answer {
-        Some(Ok(answer)) => answer.reply,
-        Some(Err(e)) => Reply::Error(format!("{e:#}")),
-        None => Reply::Error("the daemon went away".into()),
+        Some(Ok(answer)) => answer,
+        Some(Err(e)) => failed(format!("{e:#}")),
+        None => failed("the daemon went away".into()),
     }
 }
 
