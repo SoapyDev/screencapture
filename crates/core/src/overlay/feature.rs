@@ -52,12 +52,12 @@ pub struct HandOver {
     pub drawings: Option<Shared>,
 }
 
-/// A feature's buttons in the action bar: what to do with the selection (side by side with
-/// the other features'), then its settings, in a group of their own.
+/// A feature's part of the action bar: its buttons (stacked over the other features'), and
+/// the drawer that opens beside them with its settings.
 #[derive(Default)]
 pub struct Actions {
     pub main: Vec<AnyElement>,
-    pub settings: Vec<AnyElement>,
+    pub drawer: Vec<AnyElement>,
 }
 
 /// What features may read of the overlay.
@@ -128,11 +128,6 @@ pub trait Feature: Any {
 
     /// Shown on `monitor` over the dimming.
     fn over_dim(&self, _monitor: Rect) -> Vec<AnyElement> {
-        Vec::new()
-    }
-
-    /// Buttons in the top bar's first row.
-    fn main_buttons(&self, _act: &Act) -> Vec<AnyElement> {
         Vec::new()
     }
 

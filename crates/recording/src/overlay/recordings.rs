@@ -152,7 +152,7 @@ impl Feature for Recordings {
             .map(IntoElement::into_any_element);
         Actions {
             main: vec![record.into_any_element()],
-            settings: settings
+            drawer: settings
                 .chain([separator().into_any_element(), videos.into_any_element()])
                 .collect::<Vec<AnyElement>>(),
         }

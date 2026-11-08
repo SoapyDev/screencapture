@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod drawer;
+pub mod drawers;
 pub mod feature;
 pub mod folder;
 #[cfg(unix)]
@@ -31,6 +32,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use gpui::{
@@ -162,6 +164,10 @@ pub struct Overlay {
     traced: std::cell::Cell<bool>,
     /// Why the last action couldn't be done, shown above the action bar.
     notice: Option<SharedString>,
+    /// The drawers beside the features' action buttons.
+    drawers: drawers::Drawers,
+    /// Where the action buttons rest, as last painted: the drawers need the room to their left.
+    action_anchor: Rc<std::cell::Cell<Option<Rect>>>,
 }
 
 /// How the program makes its features, in the order they are asked (and their actions shown):
@@ -597,6 +603,7 @@ impl Overlay {
         resident: bool,
         features: Vec<Box<dyn Feature>>,
     ) -> Self {
+        let drawers = drawers::Drawers::new(features.len());
         let screens: Arc<[_]> = frozen.screens.into();
         let images = screens
             .iter()
@@ -617,6 +624,8 @@ impl Overlay {
             tools_ready: false,
             traced: std::cell::Cell::new(false),
             notice: None,
+            drawers,
+            action_anchor: Rc::default(),
         }
     }
 
@@ -828,7 +837,8 @@ impl Overlay {
 
     /// Esc: a feature closes something of its own first, else give up.
     fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.features.iter_mut().any(|feature| feature.escape()) {
+        let closed_a_drawer = self.drawers.escape(Instant::now());
+        if closed_a_drawer || self.features.iter_mut().any(|feature| feature.escape()) {
             cx.notify();
         } else {
             self.cancel(cx);
@@ -924,6 +934,7 @@ impl Overlay {
         if !self.selecting() {
             return;
         }
+        self.drawers.pressed_outside(Instant::now());
         if !self
             .features
             .iter_mut()
@@ -995,6 +1006,40 @@ impl Overlay {
     }
 
     /// Click handlers for feature `index`.
+    /// The pointer entered or left a part of feature `index`'s action button.
+    pub(crate) fn drawer_hover(
+        &mut self,
+        index: usize,
+        part: drawers::Part,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.drawers.hover(index, part, hovered, Instant::now());
+        self.drawers_changed(cx);
+    }
+
+    /// A press inside feature `index`'s drawer: it stays open.
+    pub(crate) fn drawer_pressed(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.drawers.option_pressed(index, Instant::now());
+        self.drawers_changed(cx);
+    }
+
+    /// Show the drawers as they are now, and come back when one is waiting on the clock.
+    fn drawers_changed(&self, cx: &mut Context<Self>) {
+        cx.notify();
+        let Some(wait) = self.drawers.next_tick(Instant::now()) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |overlay, cx| {
+                overlay.drawers.tick(Instant::now());
+                overlay.drawers_changed(cx);
+            });
+        })
+        .detach();
+    }
+
     fn act(overlay: &Entity<Self>, index: usize) -> Act {
         Act {
             overlay: overlay.clone(),
@@ -1368,7 +1413,7 @@ fn bars(overlay: &Entity<Overlay>, o: &Overlay, monitor: &MonitorInfo) -> Vec<An
     let edge = layout::toolbar_edge(monitor.rect, o.selection.region());
     vec![
         toolbar(overlay, o, edge, leaving),
-        action_bar(overlay, o, leaving),
+        action_bar(overlay, o, monitor.rect, leaving),
     ]
 }
 
@@ -1409,25 +1454,27 @@ fn main_row(overlay: &Entity<Overlay>, o: &Overlay) -> Div {
     let (mode, all) = (o.selection.mode, o.selection.is_all());
     let region = widgets::button("region", "Region  R", mode == Mode::Region);
     let screens = widgets::button("screens", "Screens  S", mode == Mode::Screens && !all);
-    let feature_buttons = o.features.iter().enumerate();
-    let feature_buttons =
-        feature_buttons.flat_map(|(index, f)| f.main_buttons(&Overlay::act(overlay, index)));
     panel()
         .child(region.on_click(act(|o, cx| o.set_mode(Mode::Region, cx))))
         .child(screens.on_click(act(|o, cx| o.set_mode(Mode::Screens, cx))))
         .child(widgets::button("all", "All screens  A", all).on_click(act(Overlay::select_all)))
         .child(separator())
-        .children(feature_buttons)
         .child(widgets::button("close", "✕", false).on_click(act(Overlay::cancel)))
 }
 
-fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, leaving: bool) -> AnyElement {
+fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, screen: Rect, leaving: bool) -> AnyElement {
     let ctx = Ctx {
         selection: &o.selection,
     };
     let features = o.features.iter().enumerate();
     let actions = features.map(|(index, f)| f.actions(&Overlay::act(overlay, index), &ctx));
-    actions::action_bar(actions.collect(), o.notice.as_ref(), leaving)
+    let bar = actions::ActionBar {
+        overlay,
+        drawers: &o.drawers,
+        anchor: &o.action_anchor,
+        screen: local(screen, screen),
+    };
+    bar.render(actions.collect(), o.notice.as_ref(), leaving)
 }
 
 /// Window-wide listeners: during a drag the compositor keeps sending pointer events to the
