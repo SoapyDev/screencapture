@@ -4,8 +4,9 @@ use std::{
     collections::VecDeque,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    process::{Child, ChildStderr, Command, Stdio},
+    sync::{Arc, Mutex, PoisonError},
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -61,15 +62,66 @@ const LOG_LINES: usize = 12;
 /// A running recording.
 pub struct Active {
     child: Child,
-    /// The file the user gets.
-    pub path: PathBuf,
-    /// What the recorder writes: `path`, or a temporary MP4 for a GIF.
-    video: PathBuf,
-    /// Removed at stop.
-    leftovers: Vec<PathBuf>,
+    files: Files,
     job: Job,
     pub started: Instant,
-    log: Arc<Mutex<VecDeque<String>>>,
+    log: Log,
+}
+
+/// The recorder's last lines of output, for error messages.
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<VecDeque<String>>>);
+
+impl Log {
+    /// Keep the last lines `stderr` prints, on a thread of its own (which ends with it).
+    fn follow(stderr: ChildStderr) -> (Self, JoinHandle<()>) {
+        let log = Self::default();
+        let kept = log.clone();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                kept.push(line);
+            }
+        });
+        (log, reader)
+    }
+
+    fn push(&self, line: String) {
+        let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if lines.len() == LOG_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+
+    /// The last lines, as the end of an error message (nothing if there are none).
+    fn tail(&self) -> String {
+        let lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let joined = lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
+        drop(lines);
+        if joined.is_empty() {
+            return joined;
+        }
+        format!(":\n{joined}")
+    }
+}
+
+/// Where the recorder is, while it starts.
+enum Starting {
+    Recording,
+    TooLong,
+    NotYet,
+}
+
+impl Ready {
+    /// How the start begun at `begun` stands.
+    fn state(&self, begun: Instant) -> Starting {
+        match self {
+            Self::File(file) if file.exists() => Starting::Recording,
+            Self::After(wait) if begun.elapsed() >= *wait => Starting::Recording,
+            Self::File(_) if begun.elapsed() >= START_TIMEOUT => Starting::TooLong,
+            _ => Starting::NotYet,
+        }
+    }
 }
 
 impl Active {
@@ -96,121 +148,96 @@ impl Active {
         Self::launch(backend, job, video.clone(), video)
     }
 
+    /// The file the user gets.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.files.path
+    }
+
     fn launch(backend: &Backend, job: Job, path: PathBuf, video: PathBuf) -> Result<Self> {
-        match backend {
+        let (program, args, ready, leftovers) = match backend {
             Backend::Gsr(program) => {
                 let stamp = first_frame_file(&video);
                 let args = plan::gsr_args(&job, &video);
-                let files = Files {
-                    path,
-                    video,
-                    leftovers: vec![stamp.clone()],
-                };
-                Self::spawn(program, &args, &Ready::File(stamp), files, job)
+                (program, args, Ready::File(stamp.clone()), vec![stamp])
             }
             Backend::Wf(program) => {
-                let args = plan::wf_args(&job, &video);
-                let files = Files {
-                    path,
-                    video,
-                    leftovers: Vec::new(),
-                };
-                Self::spawn(
-                    program,
-                    &args,
-                    &Ready::After(Duration::from_millis(500)),
-                    files,
-                    job,
-                )
+                let ready = Ready::After(Duration::from_millis(500));
+                (program, plan::wf_args(&job, &video), ready, Vec::new())
             }
-        }
+        };
+        let files = Files {
+            path,
+            video,
+            leftovers,
+        };
+        Self::spawn(program, &args, &ready, files, job)
     }
 
+    /// Run `program` and wait until it records (`ready`): a recorder that quits or never
+    /// starts leaves no file behind.
     fn spawn(program: &Path, args: &[String], ready: &Ready, files: Files, job: Job) -> Result<Self> {
-        use std::os::unix::process::CommandExt;
-        let spawned = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            // Its own process group: Ctrl+C in a terminal reaches us, and we stop it properly.
-            .process_group(0)
-            .spawn()
-            .with_context(|| format!("starting {}", program.display()));
-        let mut child = match spawned {
+        let mut child = match start_process(program, args) {
             Ok(child) => child,
             Err(e) => {
                 files.remove();
                 return Err(e);
             }
         };
-        let log = Arc::new(Mutex::new(VecDeque::with_capacity(LOG_LINES)));
-        let reader = child.stderr.take().map(|stderr| {
-            let log = log.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let mut log = log.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if log.len() == LOG_LINES {
-                        log.pop_front();
-                    }
-                    log.push_back(line);
-                }
-            })
-        });
+        let (log, reader) = child.stderr.take().map(Log::follow).unzip();
         let mut active = Self {
             child,
-            path: files.path,
-            video: files.video,
-            leftovers: files.leftovers,
+            files,
             job,
             started: Instant::now(),
-            log,
+            log: log.unwrap_or_default(),
         };
-        let begun = Instant::now();
-        loop {
-            if let Some(status) = active.child.try_wait()? {
-                // Let the last words reach the log (a helper may hold the pipe open: don't hang).
-                if let Some(reader) = reader {
-                    let until = Instant::now() + Duration::from_millis(200);
-                    while !reader.is_finished() && Instant::now() < until {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                }
-                let message = format!("the recorder stopped at once ({status}){}", active.log_tail());
-                active.discard();
-                bail!(message);
-            }
-            match ready {
-                Ready::File(file) if file.exists() => break,
-                Ready::After(wait) if begun.elapsed() >= *wait => break,
-                Ready::File(_) if begun.elapsed() >= START_TIMEOUT => {
-                    let message = format!(
-                        "the recorder didn't start within {START_TIMEOUT:?}{}",
-                        active.log_tail()
-                    );
-                    active.cancel();
-                    bail!(message);
-                }
-                _ => std::thread::sleep(Duration::from_millis(5)),
-            }
-        }
+        active.wait_until_recording(ready, reader)?;
         active.started = Instant::now();
         Ok(active)
     }
 
-    fn log_tail(&self) -> String {
-        let lines: Vec<String> = self
-            .log
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .cloned()
-            .collect();
-        if lines.is_empty() {
-            String::new()
-        } else {
-            format!(":\n{}", lines.join("\n"))
+    fn wait_until_recording(&mut self, ready: &Ready, reader: Option<JoinHandle<()>>) -> Result<()> {
+        let begun = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Err(self.quit_at_once(status, reader));
+            }
+            match ready.state(begun) {
+                Starting::Recording => return Ok(()),
+                Starting::TooLong => return Err(self.took_too_long()),
+                Starting::NotYet => std::thread::sleep(Duration::from_millis(5)),
+            }
         }
+    }
+
+    /// The recorder quit before recording: why, with its last words.
+    fn quit_at_once(
+        &self,
+        status: std::process::ExitStatus,
+        reader: Option<JoinHandle<()>>,
+    ) -> anyhow::Error {
+        // Let the last words reach the log (a helper may hold the pipe open: don't hang).
+        if let Some(reader) = reader {
+            let until = Instant::now() + Duration::from_millis(200);
+            while !reader.is_finished() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let message = format!("the recorder stopped at once ({status}){}", self.log.tail());
+        self.files.remove();
+        anyhow::anyhow!(message)
+    }
+
+    /// The recorder never got its first frame: stop it, and say so.
+    fn took_too_long(&mut self) -> anyhow::Error {
+        let message = format!(
+            "the recorder didn't start within {START_TIMEOUT:?}{}",
+            self.log.tail()
+        );
+        let _ = self.finish();
+        self.files.remove();
+        anyhow::anyhow!(message)
     }
 
     /// Ask the recorder to finish (SIGINT, which both recorders treat as "save and quit"),
@@ -234,15 +261,6 @@ impl Active {
         }
     }
 
-    fn discard(&self) {
-        Files {
-            path: self.path.clone(),
-            video: self.video.clone(),
-            leftovers: self.leftovers.clone(),
-        }
-        .remove();
-    }
-
     /// Whether the recorder is still running.
     pub fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
@@ -252,16 +270,16 @@ impl Active {
     pub fn stop(mut self) -> Result<PathBuf> {
         self.finish_video()?;
         if self.job.gif {
-            convert_to_gif(self.job.fps, &self.video, &self.path)?;
+            convert_to_gif(self.job.fps, &self.files.video, &self.files.path)?;
         }
-        Ok(self.path.clone())
+        Ok(self.files.path.clone())
     }
 
     /// Finish the file of one screen of several, and say when its first frame was taken.
     pub fn stop_part(mut self) -> Result<Stopped> {
         let first_frame = self.finish_video()?;
         Ok(Stopped {
-            video: self.video.clone(),
+            video: self.files.video.clone(),
             first_frame,
         })
     }
@@ -269,15 +287,14 @@ impl Active {
     /// Stop the recorder and check it left a video; the first frame's time, if it said.
     fn finish_video(&mut self) -> Result<Option<u64>> {
         self.finish()?;
-        let first_frame = std::fs::read_to_string(first_frame_file(&self.video))
-            .ok()
-            .and_then(|text| parse_first_frame(&text));
-        for file in &self.leftovers {
+        let stamp = std::fs::read_to_string(first_frame_file(&self.files.video)).ok();
+        let first_frame = stamp.and_then(|text| parse_first_frame(&text));
+        for file in &self.files.leftovers {
             let _ = std::fs::remove_file(file);
         }
-        if std::fs::metadata(&self.video).map_or(true, |m| m.len() == 0) {
-            let message = format!("the recorder saved nothing{}", self.log_tail());
-            self.discard();
+        if std::fs::metadata(&self.files.video).map_or(true, |m| m.len() == 0) {
+            let message = format!("the recorder saved nothing{}", self.log.tail());
+            self.files.remove();
             bail!(message);
         }
         Ok(first_frame)
@@ -286,8 +303,22 @@ impl Active {
     /// Stop and throw the recording away.
     pub fn cancel(mut self) {
         let _ = self.finish();
-        self.discard();
+        self.files.remove();
     }
+}
+
+/// Start `program` with `args`, quiet, in its own process group: Ctrl+C in a terminal reaches
+/// us, and we stop it properly.
+fn start_process(program: &Path, args: &[String]) -> Result<Child> {
+    use std::os::unix::process::CommandExt;
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("starting {}", program.display()))
 }
 
 impl Drop for Active {
@@ -317,12 +348,15 @@ pub fn parse_first_frame(text: &str) -> Option<u64> {
     values.split_whitespace().next()?.parse().ok()
 }
 
-/// Run ffmpeg with `args`; `what` names the job in errors.
+/// Run ffmpeg with `args`; `what` names the job in errors. In its own process group, like the
+/// recorders: a second Ctrl+C while the screens are joined must not cut the join short.
 pub fn ffmpeg(args: &[String], what: &str) -> Result<()> {
+    use std::os::unix::process::CommandExt;
     let ran = Command::new("ffmpeg")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
+        .process_group(0)
         .output()
         .with_context(|| format!("running ffmpeg to {what}"))?;
     if !ran.status.success() {

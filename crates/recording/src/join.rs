@@ -44,17 +44,10 @@ pub fn skips(first_frames: &[Option<u64>]) -> Vec<Duration> {
 /// ffmpeg arguments joining `inputs` as `join` says into `out`.
 #[must_use]
 pub fn join_args(inputs: &[Input], join: &Join, out: &Path, encoder: Encoder) -> Vec<String> {
-    let mut args = words(&["-v", "error", "-y", "-hwaccel", "auto"]);
-    for input in inputs {
-        let skip = format!("{:.3}", input.skip.as_secs_f64());
-        args.extend(["-ss".into(), skip, "-i".into(), input.video.display().to_string()]);
-    }
-    args.extend([
-        "-filter_complex".into(),
-        filter_graph(inputs, join.fps),
-        "-map".into(),
-        "[joined]".into(),
-    ]);
+    let mut args = words(&["-v", "error", "-y"]);
+    args.extend(inputs.iter().flat_map(input_args));
+    let graph = filter_graph(inputs, join.fps);
+    args.extend(["-filter_complex".into(), graph, "-map".into(), "[joined]".into()]);
     if join.audio {
         args.extend(words(&["-map", "0:a", "-c:a", "copy"]));
     }
@@ -62,6 +55,21 @@ pub fn join_args(inputs: &[Input], join: &Join, out: &Path, encoder: Encoder) ->
     args.extend(words(&["-movflags", "+faststart"]));
     args.push(out.display().to_string());
     args
+}
+
+/// One part, decoded with the GPU's help where there is one (`-hwaccel` is an input option:
+/// it applies to the next `-i` only), from its skip on.
+fn input_args(input: &Input) -> [String; 6] {
+    let skip = format!("{:.3}", input.skip.as_secs_f64());
+    let video = input.video.display().to_string();
+    [
+        "-hwaccel".into(),
+        "auto".into(),
+        "-ss".into(),
+        skip,
+        "-i".into(),
+        video,
+    ]
 }
 
 fn words(list: &[&str]) -> Vec<String> {
@@ -91,28 +99,33 @@ fn filter_graph(inputs: &[Input], fps: u32) -> String {
 
 /// The video encoder and its quality setting.
 fn encoder_args(codec: Codec, quality: Quality, encoder: Encoder) -> Vec<String> {
-    let level = quality_level(codec, quality, encoder).to_string();
-    let (name, mut args) = match (encoder, codec) {
-        (Encoder::Gpu, Codec::Av1) => (
-            "av1_nvenc",
-            words(&["-preset", "p5", "-rc", "vbr", "-b:v", "0", "-cq"]),
-        ),
-        (Encoder::Gpu, Codec::H264) => (
-            "h264_nvenc",
-            words(&["-preset", "p5", "-rc", "vbr", "-b:v", "0", "-cq"]),
-        ),
-        (Encoder::Gpu, Codec::Hevc) => (
-            "hevc_nvenc",
-            words(&["-preset", "p5", "-rc", "vbr", "-b:v", "0", "-cq"]),
-        ),
-        (Encoder::Cpu, Codec::Av1) => ("libsvtav1", words(&["-preset", "8", "-crf"])),
-        (Encoder::Cpu, Codec::H264) => ("libx264", words(&["-preset", "veryfast", "-crf"])),
-        (Encoder::Cpu, Codec::Hevc) => ("libx265", words(&["-preset", "fast", "-crf"])),
-    };
-    args.push(level);
-    let mut all = words(&["-c:v", name]);
-    all.append(&mut args);
-    all
+    let mut args = words(&["-c:v", encoder_name(codec, encoder)]);
+    args.extend(match encoder {
+        Encoder::Gpu => words(&["-preset", "p5", "-rc", "vbr", "-b:v", "0", "-cq"]),
+        Encoder::Cpu => words(&["-preset", software_preset(codec), "-crf"]),
+    });
+    args.push(quality_level(codec, quality, encoder).to_string());
+    args
+}
+
+const fn encoder_name(codec: Codec, encoder: Encoder) -> &'static str {
+    match (encoder, codec) {
+        (Encoder::Gpu, Codec::Av1) => "av1_nvenc",
+        (Encoder::Gpu, Codec::H264) => "h264_nvenc",
+        (Encoder::Gpu, Codec::Hevc) => "hevc_nvenc",
+        (Encoder::Cpu, Codec::Av1) => "libsvtav1",
+        (Encoder::Cpu, Codec::H264) => "libx264",
+        (Encoder::Cpu, Codec::Hevc) => "libx265",
+    }
+}
+
+/// The software encoders' speed for a join: fast, the quality comes from the level.
+const fn software_preset(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Av1 => "8",
+        Codec::H264 => "veryfast",
+        Codec::Hevc => "fast",
+    }
 }
 
 /// Constant-quality level for `quality` (lower is better; scales differ per encoder).
@@ -248,6 +261,15 @@ mod tests {
         assert_eq!(
             args(&join(), Encoder::Gpu).last().map(String::as_str),
             Some("/v/a.mp4")
+        );
+    }
+
+    #[test]
+    fn every_part_is_decoded_with_hardware_help() {
+        let args = args(&join(), Encoder::Gpu);
+        assert_eq!(
+            args.iter().filter(|word| *word == "-hwaccel").count(),
+            inputs().len()
         );
     }
 }

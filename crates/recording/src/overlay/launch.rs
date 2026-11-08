@@ -100,29 +100,42 @@ fn reply_of(answer: Option<anyhow::Result<daemon::Answer>>) -> Reply {
 /// `drawings` go with its first frame.
 pub fn drive_frames(drawings: Option<Shared>, work: impl FnOnce(ShowFrame) + Send + 'static, cx: &mut App) {
     cx.set_global(FrameDrawings(drawings));
-    // `Some(frame)`: show it (or take it down); `None`: the work is done.
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     std::thread::spawn(move || {
-        work(&mut |frame| {
-            // Owned only here, to cross to the UI thread.
-            let _ = tx.unbounded_send(Some(frame.cloned()));
-        });
-        let _ = tx.unbounded_send(None);
+        // Owned only here, to cross to the UI thread.
+        work(&mut |frame| drop(tx.unbounded_send(Work::Show(frame.cloned()))));
+        let _ = tx.unbounded_send(Work::Done);
     });
     cx.spawn(async move |cx| {
         let mut shown = None;
-        while let Some(Some(frame)) = rx.next().await {
-            cx.update(|cx| {
-                let spec = spec_for(frame, cx);
-                replace_frame(&mut shown, spec, cx);
-            });
+        while let Some(work) = rx.next().await {
+            cx.update(|cx| work.show(&mut shown, cx));
         }
-        cx.update(|cx| {
-            replace_frame(&mut shown, None, cx);
-            cx.quit();
-        });
     })
     .detach();
+}
+
+/// What the work on its own thread asks of the UI thread.
+enum Work {
+    /// Show this frame (or take it down).
+    Show(Option<OnScreen>),
+    /// The work is done: take the frame down, and quit.
+    Done,
+}
+
+impl Work {
+    fn show(self, shown: &mut Option<Shown>, cx: &mut App) {
+        match self {
+            Self::Show(frame) => {
+                let spec = spec_for(frame, cx);
+                replace_frame(shown, spec, cx);
+            }
+            Self::Done => {
+                replace_frame(shown, None, cx);
+                cx.quit();
+            }
+        }
+    }
 }
 
 /// Run `work` (a recording in this process) with its frame on screen; returns what it returned.

@@ -26,27 +26,39 @@ pub fn run(command: Command, socket: &Path, show_frame: ShowFrame) -> anyhow::Re
     let mut recorder = Recorder::default();
     let outcome = match recorder.run(command, &mut super::LiveEnv) {
         Outcome::Started { path, notes } => {
-            for note in notes {
-                eprintln!("screencapture: {note}");
-            }
-            eprintln!(
-                "screencapture: recording to {} (Ctrl+C or `screencapture record stop` ends it)",
-                path.display()
-            );
-            show_frame(recorder.frame());
-            let (ended, client) = serve(&listener, &mut recorder, &mut super::LiveEnv, &stop);
-            // The frame goes first: joining screens takes a while.
-            show_frame(None);
-            let ended = ended.finished();
-            if let Some(client) = client {
-                ended.clone().answer(client);
-            }
-            ended
+            tell_how_to_stop(&path, &notes);
+            record_until_stopped(&listener, &mut recorder, &stop, show_frame)
         }
         other => other,
     };
     let _ = std::fs::remove_file(socket);
     Ok(outcome)
+}
+
+fn tell_how_to_stop(path: &Path, notes: &[String]) {
+    for note in notes {
+        eprintln!("screencapture: {note}");
+    }
+    let path = path.display();
+    eprintln!("screencapture: recording to {path} (Ctrl+C or `screencapture record stop` ends it)");
+}
+
+/// Show the frame and answer clients until the recording ends; then finish the file.
+fn record_until_stopped(
+    listener: &UnixListener,
+    recorder: &mut Recorder,
+    stop: &AtomicBool,
+    show_frame: ShowFrame,
+) -> Outcome {
+    show_frame(recorder.frame());
+    let (ended, client) = serve(listener, recorder, &mut super::LiveEnv, stop);
+    // The frame goes first: joining screens takes a while.
+    show_frame(None);
+    let ended = ended.finished();
+    if let Some(client) = client {
+        ended.clone().answer(client);
+    }
+    ended
 }
 
 /// A flag that Ctrl+C, SIGTERM and SIGHUP raise (instead of killing the process).
@@ -68,36 +80,64 @@ fn serve(
     stop: &AtomicBool,
 ) -> (Outcome, Option<Client>) {
     loop {
-        if stop.load(Ordering::Relaxed) {
-            return (recorder.run(Command::Stop, env), None);
+        if let Some(ended) = ended_meanwhile(recorder, env, stop) {
+            return (ended, None);
         }
-        if let Some(outcome) = recorder.ended_by_itself() {
-            return (outcome, None);
-        }
-        if !daemon::readable_within(listener, Duration::from_millis(100)) {
-            continue;
-        }
-        let Some(daemon::Pending { request, client }) = daemon::accept::<Command>(listener) else {
+        let Some(pending) = next_request(listener) else {
             continue;
         };
-        let (outcome, ends) = match request {
-            Request::Feature(command @ Command::Start(..)) => (recorder.run(command, env), false),
-            Request::Feature(Command::Stop | Command::Toggle(..)) => (recorder.run(Command::Stop, env), true),
-            Request::Feature(Command::Discard) => (recorder.run(Command::Discard, env), true),
-            Request::Overlay(_) => {
-                client.reply(&Reply::Recording(
-                    recorder
-                        .recording()
-                        .map_or_else(Default::default, Path::to_path_buf),
-                ));
-                continue;
-            }
-        };
-        if ends {
-            return (outcome, Some(client));
+        if let Some((ended, client)) = handle(pending, recorder, env) {
+            return (ended, Some(client));
         }
-        outcome.answer(client);
     }
+}
+
+/// A stop signal arrived, or the recorder quit by itself: how the recording ended.
+fn ended_meanwhile(recorder: &mut Recorder, env: &mut impl Env, stop: &AtomicBool) -> Option<Outcome> {
+    if stop.load(Ordering::Relaxed) {
+        return Some(recorder.run(Command::Stop, env));
+    }
+    recorder.ended_by_itself()
+}
+
+/// The next client's request, if one knocks soon (so signals are noticed meanwhile).
+fn next_request(listener: &UnixListener) -> Option<daemon::Pending<Command>> {
+    if !daemon::readable_within(listener, Duration::from_millis(100)) {
+        return None;
+    }
+    daemon::accept(listener)
+}
+
+/// One request while recording: the outcome and its client if it ends the recording.
+fn handle(
+    pending: daemon::Pending<Command>,
+    recorder: &mut Recorder,
+    env: &mut impl Env,
+) -> Option<(Outcome, Client)> {
+    let daemon::Pending { request, client } = pending;
+    let command = match request {
+        Request::Feature(command) => command,
+        Request::Overlay(_) => {
+            let path = recorder
+                .recording()
+                .map_or_else(Default::default, Path::to_path_buf);
+            client.reply(&Reply::Recording(path));
+            return None;
+        }
+    };
+    let ends = !matches!(command, Command::Start(..));
+    // Toggling a running recording stops it.
+    let command = if matches!(command, Command::Toggle(..)) {
+        Command::Stop
+    } else {
+        command
+    };
+    let outcome = recorder.run(command, env);
+    if ends {
+        return Some((outcome, client));
+    }
+    outcome.answer(client);
+    None
 }
 
 #[cfg(test)]

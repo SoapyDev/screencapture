@@ -53,7 +53,7 @@ impl Session {
     /// A recording made by `active` alone.
     #[must_use]
     pub fn single(active: Active) -> Self {
-        let path = active.path.clone();
+        let path = active.path().to_path_buf();
         Self {
             parts: vec![(active, Rect::new(0, 0, 0, 0))],
             join: None,
@@ -88,7 +88,9 @@ impl Session {
             return active.stop().map(Finishing::Done);
         };
         let slots: Vec<Rect> = self.parts.iter().map(|(_, slot)| *slot).collect();
-        let parts = stop_parts(self.parts.into_iter().map(|(active, _)| active).collect())?;
+        let stopped = stop_parts(self.parts.into_iter().map(|(active, _)| active).collect());
+        // One part failed: the others are no use alone, and the file was only reserved.
+        let parts = stopped.inspect_err(|_| remove_all(&self.path, slots.len()))?;
         Ok(Finishing::Join {
             parts,
             slots,
@@ -124,6 +126,14 @@ impl Finishing {
                 path,
             } => join_parts(&parts, &slots, &plan, &path),
         }
+    }
+}
+
+/// The file reserved at `path`, and the videos of its `parts`.
+fn remove_all(path: &Path, parts: usize) {
+    let videos = (0..parts).map(|index| part_video(path, index));
+    for file in std::iter::once(path.to_path_buf()).chain(videos) {
+        let _ = std::fs::remove_file(file);
     }
 }
 
@@ -193,23 +203,17 @@ fn stop_parts(parts: Vec<Active>) -> Result<Vec<Stopped>> {
 
 /// Join the parts into `path` (through a temporary video for a GIF), then remove them.
 fn join_parts(stopped: &[Stopped], slots: &[Rect], plan: &Join, path: &Path) -> Result<PathBuf> {
-    let skips = join::skips(&stopped.iter().map(|s| s.first_frame).collect::<Vec<_>>());
-    let inputs: Vec<Input> = stopped
-        .iter()
-        .zip(slots)
-        .zip(skips)
-        .map(|((part, &slot), skip)| Input {
-            video: part.video.clone(),
-            slot,
-            skip,
-        })
-        .collect();
     let video = if plan.gif {
         path.with_extension("part.mp4")
     } else {
         path.to_path_buf()
     };
-    encode_joined(&inputs, plan, &video)?;
+    if let Err(e) = encode_joined(&inputs(stopped, slots), plan, &video) {
+        // Nothing half-made stays behind (the parts are kept, and the error says where).
+        let _ = std::fs::remove_file(&video);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
     for part in stopped {
         let _ = std::fs::remove_file(&part.video);
     }
@@ -217,6 +221,18 @@ fn join_parts(stopped: &[Stopped], slots: &[Rect], plan: &Join, path: &Path) -> 
         recorder::convert_to_gif(plan.fps, &video, path)?;
     }
     Ok(path.to_path_buf())
+}
+
+/// Each part's video in its slot, lined up on the latest first frame.
+fn inputs(stopped: &[Stopped], slots: &[Rect]) -> Vec<Input> {
+    let skips = join::skips(&stopped.iter().map(|s| s.first_frame).collect::<Vec<_>>());
+    let parts = stopped.iter().zip(slots).zip(skips);
+    let input = |((part, &slot), skip): ((&Stopped, &Rect), _)| Input {
+        video: part.video.clone(),
+        slot,
+        skip,
+    };
+    parts.map(input).collect()
 }
 
 /// On the GPU if it can, else in software.

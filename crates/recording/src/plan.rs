@@ -122,32 +122,39 @@ pub struct Join {
 
 /// The desktop area `target` covers, on `monitors`.
 pub fn area(target: &Target, monitors: &[MonitorInfo], focused: Option<&str>) -> Result<Rect> {
-    let union = |rects: &mut dyn Iterator<Item = Rect>| rects.reduce(Rect::union);
     let found = match target {
-        Target::Focused => focused
-            .and_then(|name| monitors.iter().find(|m| m.name == name))
-            .or_else(|| monitors.first())
-            .map(|m| m.rect),
-        Target::All => union(&mut monitors.iter().map(|m| m.rect)),
-        Target::Screens(names) => {
-            let mut rects = Vec::with_capacity(names.len());
-            for name in names {
-                match monitors.iter().find(|m| &m.name == name) {
-                    Some(m) => rects.push(m.rect),
-                    None => bail!("no screen named {name:?}"),
-                }
-            }
-            union(&mut rects.into_iter())
-        }
-        Target::Region(region) => {
-            let found = union(&mut monitors.iter().filter_map(|m| m.rect.intersect(*region)));
-            if found.is_none() {
-                bail!("the region is on no screen");
-            }
-            found
-        }
+        Target::Focused => focused_screen(monitors, focused).map(|m| m.rect),
+        Target::All => monitors.iter().map(|m| m.rect).reduce(Rect::union),
+        Target::Screens(names) => named_screens(names, monitors)?,
+        Target::Region(region) => Some(region_on_screens(*region, monitors)?),
     };
     found.ok_or_else(|| anyhow::anyhow!("no screens found"))
+}
+
+/// The focused screen, else the first.
+fn focused_screen<'a>(monitors: &'a [MonitorInfo], focused: Option<&str>) -> Option<&'a MonitorInfo> {
+    let named = focused.and_then(|name| monitors.iter().find(|m| m.name == name));
+    named.or_else(|| monitors.first())
+}
+
+/// The screens called `names`, together; an unknown name is an error.
+fn named_screens(names: &[String], monitors: &[MonitorInfo]) -> Result<Option<Rect>> {
+    let rect_of = |name: &String| {
+        let screen = monitors.iter().find(|m| &m.name == name);
+        screen
+            .map(|m| m.rect)
+            .ok_or_else(|| anyhow::anyhow!("no screen named {name:?}"))
+    };
+    let rects: Vec<Rect> = names.iter().map(rect_of).collect::<Result<_>>()?;
+    Ok(rects.into_iter().reduce(Rect::union))
+}
+
+/// The part of `region` on the screens.
+fn region_on_screens(region: Rect, monitors: &[MonitorInfo]) -> Result<Rect> {
+    let pieces = monitors.iter().filter_map(|m| m.rect.intersect(region));
+    pieces
+        .reduce(Rect::union)
+        .ok_or_else(|| anyhow::anyhow!("the region is on no screen"))
 }
 
 /// Smallest side worth recording, in logical px.
@@ -224,6 +231,23 @@ fn scaled((w, h): (u32, u32), factor: f64) -> (u32, u32) {
     (even(f64::from(w) * factor), even(f64::from(h) * factor))
 }
 
+/// One recorder's job per part; the first records the sound.
+fn part_jobs(
+    parts: &[super::split::Part],
+    video: &Video,
+    settings: Settings,
+    rate: (u32, bool),
+) -> Vec<PartJob> {
+    let several = parts.len() > 1;
+    let role = |index| PartRole {
+        first: index == 0,
+        several,
+    };
+    let jobs = parts.iter().enumerate();
+    jobs.map(|(index, part)| video.part_job(part, role(index), settings, rate))
+        .collect()
+}
+
 /// The plan for recording `target`.
 pub fn plan(
     target: &Target,
@@ -238,21 +262,7 @@ pub fn plan(
     let video = Video::fitted(joined, settings);
     let rate = frame_rate(settings.fps, refresh_rate(&screens), load);
     let several = parts.len() > 1;
-    let jobs = parts
-        .iter()
-        .enumerate()
-        .map(|(index, part)| {
-            video.part_job(
-                part,
-                PartRole {
-                    first: index == 0,
-                    several,
-                },
-                settings,
-                rate,
-            )
-        })
-        .collect();
+    let jobs = part_jobs(&parts, &video, settings, rate);
     let join = several.then(|| video.join(settings, rate.0));
     Ok(Plan {
         parts: jobs,
@@ -277,12 +287,6 @@ fn screens_of<'a>(
             .filter(|m| m.rect.intersect(area).is_some())
             .collect(),
     }
-}
-
-fn focused_screen<'a>(monitors: &'a [MonitorInfo], focused: Option<&str>) -> Option<&'a MonitorInfo> {
-    focused
-        .and_then(|name| monitors.iter().find(|m| m.name == name))
-        .or_else(|| monitors.first())
 }
 
 /// The fastest refresh rate among `screens`, in Hz.
@@ -413,30 +417,43 @@ const fn first_codec(format: Format) -> Codec {
 
 /// The codec and size that encoders take for `size`, and what had to change.
 fn within_codec_limits(size: (u32, u32), codec: Codec) -> (Codec, (u32, u32), Vec<String>) {
-    let longest = |(w, h): (u32, u32)| w.max(h);
     let mut notes = Vec::new();
-    let mut codec = codec;
-    if codec == Codec::H264 && longest(size) > Codec::H264.max_side() {
-        codec = Codec::Av1;
-        notes.push(format!(
-            "H.264 can't encode more than {} px across: recording in AV1",
-            Codec::H264.max_side()
-        ));
+    let codec = codec_for(size, codec, &mut notes);
+    let size = fitted_to(size, codec, &mut notes);
+    (codec, size, notes)
+}
+
+/// The longer side of `(w, h)`.
+fn longest((w, h): (u32, u32)) -> u32 {
+    w.max(h)
+}
+
+/// `codec`, unless it is H.264 and `size` is too big for it: then AV1, noted.
+fn codec_for(size: (u32, u32), codec: Codec, notes: &mut Vec<String>) -> Codec {
+    let limit = Codec::H264.max_side();
+    if codec != Codec::H264 || longest(size) <= limit {
+        return codec;
     }
-    if longest(size) <= codec.max_side() {
-        return (codec, size, notes);
-    }
-    let fitted = scaled(size, f64::from(codec.max_side()) / f64::from(longest(size)));
-    // Rounding to even may have gone a pixel over.
-    let fitted = (fitted.0.min(codec.max_side()), fitted.1.min(codec.max_side()));
     notes.push(format!(
-        "{} can't encode more than {} px across: scaled to {}x{}",
-        codec.label(),
-        codec.max_side(),
-        fitted.0,
-        fitted.1
+        "H.264 can't encode more than {limit} px across: recording in AV1"
     ));
-    (codec, fitted, notes)
+    Codec::Av1
+}
+
+/// `size`, scaled down (noted) if `codec` can't encode it.
+fn fitted_to(size: (u32, u32), codec: Codec, notes: &mut Vec<String>) -> (u32, u32) {
+    let limit = codec.max_side();
+    if longest(size) <= limit {
+        return size;
+    }
+    let (w, h) = scaled(size, f64::from(limit) / f64::from(longest(size)));
+    // Rounding to even may have gone a pixel over.
+    let (w, h) = (w.min(limit), h.min(limit));
+    notes.push(format!(
+        "{} can't encode more than {limit} px across: scaled to {w}x{h}",
+        codec.label()
+    ));
+    (w, h)
 }
 
 fn strings<const N: usize>(words: [&str; N]) -> impl Iterator<Item = String> {
@@ -456,42 +473,59 @@ const fn audio_sources(audio: Audio) -> Option<&'static str> {
 #[must_use]
 pub fn gsr_args(job: &Job, out: &Path) -> Vec<String> {
     let Rect { x, y, w, h } = job.area;
-    let codec = match job.codec {
-        Codec::Av1 => "av1",
-        Codec::H264 => "h264",
-        Codec::Hevc => "hevc",
-    };
-    let quality = match job.quality {
-        Quality::Medium => "medium",
-        Quality::High => "high",
-        Quality::VeryHigh => "very_high",
-        Quality::Ultra => "ultra",
-    };
+    let frames = if job.variable { "vfr" } else { "cfr" };
     let mut args: Vec<String> = vec![
         "-w".into(),
         format!("{w}x{h}+{x}+{y}"),
         "-f".into(),
         job.fps.to_string(),
-        "-fm".into(),
-        if job.variable { "vfr" } else { "cfr" }.into(),
     ];
     args.extend(strings([
-        "-k", codec, "-q", quality, "-c", "mp4", "-cursor", "yes",
+        "-fm",
+        frames,
+        "-k",
+        gsr_codec(job.codec),
+        "-q",
+        gsr_quality(job.quality),
     ]));
+    args.extend(strings(["-c", "mp4", "-cursor", "yes"]));
     // Written once the first frame is in: the signal that recording really started.
     args.extend(strings(["-write-first-frame-ts", "yes"]));
     if let Some((w, h)) = job.size {
         args.extend(["-s".into(), format!("{w}x{h}")]);
     }
-    if let Some(sources) = audio_sources(job.audio) {
-        args.extend(strings(["-a", sources]));
-        // H.264 is the compatibility choice: AAC goes with it. Otherwise gsr's Opus.
-        if job.codec == Codec::H264 {
-            args.extend(strings(["-ac", "aac"]));
-        }
-    }
+    args.extend(gsr_audio_args(job));
     args.extend(["-o".into(), out.display().to_string()]);
     args
+}
+
+const fn gsr_codec(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Av1 => "av1",
+        Codec::H264 => "h264",
+        Codec::Hevc => "hevc",
+    }
+}
+
+const fn gsr_quality(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Medium => "medium",
+        Quality::High => "high",
+        Quality::VeryHigh => "very_high",
+        Quality::Ultra => "ultra",
+    }
+}
+
+/// The sound sources, and its codec: H.264 is the compatibility choice, so AAC goes with it;
+/// otherwise gsr's Opus.
+fn gsr_audio_args(job: &Job) -> Vec<String> {
+    let Some(sources) = audio_sources(job.audio) else {
+        return Vec::new();
+    };
+    let aac = (job.codec == Codec::H264).then_some(["-ac", "aac"]);
+    strings(["-a", sources])
+        .chain(aac.into_iter().flatten().map(String::from))
+        .collect()
 }
 
 /// `wf-recorder` arguments (fallback when gpu-screen-recorder is missing). It encodes on the

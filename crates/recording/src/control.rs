@@ -80,19 +80,7 @@ impl Recorder {
     }
 
     fn start(&mut self, target: &Target, overrides: Overrides, env: &mut impl Env) -> Outcome {
-        let started = (|| {
-            let (plan, dir, monitors) = plan_for(target, overrides, env)?;
-            let notes = plan.notes.clone();
-            let areas = plan.parts.iter().map(|part| part.job.area).collect();
-            let summary = plan.summary();
-            let on_screen = OnScreen {
-                areas,
-                monitors,
-                summary,
-            };
-            anyhow::Ok((env.start(plan, &dir)?, notes, on_screen))
-        })();
-        match started {
+        match begin(target, overrides, env) {
             Ok((session, notes, frame)) => {
                 let path = session.path().to_path_buf();
                 self.active = Some(session);
@@ -138,6 +126,22 @@ impl Recorder {
         }
         Some(self.stop())
     }
+}
+
+/// Start recording `target`: the session, what the plan noted, and what to show meanwhile.
+fn begin(
+    target: &Target,
+    overrides: Overrides,
+    env: &mut impl Env,
+) -> Result<(Session, Vec<String>, OnScreen)> {
+    let (plan, dir, monitors) = plan_for(target, overrides, env)?;
+    let notes = plan.notes.clone();
+    let on_screen = OnScreen {
+        areas: plan.parts.iter().map(|part| part.job.area).collect(),
+        monitors,
+        summary: plan.summary(),
+    };
+    Ok((env.start(plan, &dir)?, notes, on_screen))
 }
 
 /// The plan for `target` in `env`, the folder to record into, and the screens it saw.

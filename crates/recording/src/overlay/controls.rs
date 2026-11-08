@@ -176,31 +176,41 @@ impl DrawerView {
 
 impl Render for DrawerView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let controls = self.controls.read(cx);
-        let clock = drawer::clock(controls.started.elapsed());
-        let summary = controls.summary.clone();
-        let panel = panel()
-            .child(div().size(px(10.)).rounded_full().bg(rgba(0xff4d4dff)))
-            .child(div().px_2().child(clock))
-            .child(div().px_2().text_color(rgba(0xffffffa0)).child(summary))
-            .child(separator())
-            .child(command_button(&self.controls, "stop", "■ Stop", Command::Stop))
-            .child(command_button(
-                &self.controls,
-                "discard",
-                "✕ Discard",
-                Command::Discard,
-            ));
         let slide_in = Animation::new(actions::SLIDE).with_easing(ease_in_out);
+        let panel = self
+            .panel(cx)
+            .with_animation("drawer-in", slide_in, |panel, delta| {
+                panel.mt(px(-56. * (1. - delta)))
+            });
         div()
             .id("drawer")
             .size_full()
             .flex()
             .justify_center()
-            .child(panel.with_animation("drawer-in", slide_in, |panel, delta| {
-                panel.mt(px(-56. * (1. - delta)))
-            }))
+            .child(panel)
             .child(pointer_tracking(&self.controls, None))
+    }
+}
+
+impl DrawerView {
+    /// The red dot, time recorded, what is recorded, Stop and Discard.
+    fn panel(&self, cx: &Context<Self>) -> gpui::Div {
+        let controls = self.controls.read(cx);
+        let clock = drawer::clock(controls.started.elapsed());
+        let stop = command_button(&self.controls, "stop", "■ Stop", Command::Stop);
+        let discard = command_button(&self.controls, "discard", "✕ Discard", Command::Discard);
+        panel()
+            .child(div().size(px(10.)).rounded_full().bg(rgba(0xff4d4dff)))
+            .child(div().px_2().child(clock))
+            .child(
+                div()
+                    .px_2()
+                    .text_color(rgba(0xffffffa0))
+                    .child(controls.summary.clone()),
+            )
+            .child(separator())
+            .child(stop)
+            .child(discard)
     }
 }
 

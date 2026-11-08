@@ -100,27 +100,11 @@ mod view {
     /// A layer surface over everything at `bounds` (desktop px) on `screen`, without keyboard
     /// focus.
     pub fn layer_options(bounds: Rect, screen: Rect, display: DisplayId) -> WindowOptions {
-        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
-        let kind = WindowKind::LayerShell(LayerShellOptions {
-            namespace: "screencapture-recording".into(),
-            layer: Layer::Overlay,
-            anchor: Anchor::TOP | Anchor::LEFT,
-            // Placed from the screen's corner, not pushed aside by panels.
-            exclusive_zone: Some(px(-1.)),
-            margin: Some((
-                px((bounds.y - screen.y) as f32),
-                px(0.),
-                px(0.),
-                px((bounds.x - screen.x) as f32),
-            )),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            ..LayerShellOptions::default()
-        });
         let window_size = size(px(bounds.w as f32), px(bounds.h as f32));
         WindowOptions {
             titlebar: None,
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(Point::default(), window_size))),
-            kind,
+            kind: layer_over_everything(bounds, screen),
             focus: false,
             show: true,
             is_movable: false,
@@ -130,6 +114,21 @@ mod view {
             app_id: Some("screencapture".into()),
             ..WindowOptions::default()
         }
+    }
+
+    /// Top layer, placed from `screen`'s corner at `bounds`, not pushed aside by panels.
+    fn layer_over_everything(bounds: Rect, screen: Rect) -> WindowKind {
+        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
+        let (top, left) = (px((bounds.y - screen.y) as f32), px((bounds.x - screen.x) as f32));
+        WindowKind::LayerShell(LayerShellOptions {
+            namespace: "screencapture-recording".into(),
+            layer: Layer::Overlay,
+            anchor: Anchor::TOP | Anchor::LEFT,
+            exclusive_zone: Some(px(-1.)),
+            margin: Some((top, px(0.), px(0.), left)),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            ..LayerShellOptions::default()
+        })
     }
 
     fn open_frame(

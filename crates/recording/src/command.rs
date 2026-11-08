@@ -50,6 +50,7 @@ impl Command {
             .join(" ")
     }
 
+    #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         let mut words = text.split_whitespace();
         let verb = words.next()?;
@@ -59,26 +60,7 @@ impl Command {
             "discard" => return alone(Self::Discard),
             _ => {}
         }
-        let target = match words.next()? {
-            "focused" => Target::Focused,
-            "all" => Target::All,
-            "screens" => Target::Screens(words.next()?.split(',').map(String::from).collect()),
-            "region" => {
-                let n: Vec<i32> = words
-                    .next()?
-                    .split(',')
-                    .map(str::parse)
-                    .collect::<Result<_, _>>()
-                    .ok()?;
-                let [x, y, w, h] = n[..] else { return None };
-                let rect = Rect::new(x, y, w, h);
-                if rect.is_empty() {
-                    return None;
-                }
-                Target::Region(rect)
-            }
-            _ => return None,
-        };
+        let target = parse_target(&mut words)?;
         let mut overrides = Overrides::default();
         for word in words {
             overrides.parse_word(word)?;
@@ -95,6 +77,27 @@ impl Command {
     pub const fn starts(&self) -> bool {
         !matches!(self, Self::Stop | Self::Discard)
     }
+}
+
+/// The target's words: `focused`, `all`, `screens A,B` or `region X,Y,W,H`.
+fn parse_target<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<Target> {
+    match words.next()? {
+        "focused" => Some(Target::Focused),
+        "all" => Some(Target::All),
+        "screens" => Some(Target::Screens(
+            words.next()?.split(',').map(String::from).collect(),
+        )),
+        "region" => parse_region(words.next()?).map(Target::Region),
+        _ => None,
+    }
+}
+
+/// `X,Y,W,H`, not empty.
+fn parse_region(word: &str) -> Option<Rect> {
+    let numbers: Vec<i32> = word.split(',').map(str::parse).collect::<Result<_, _>>().ok()?;
+    let [x, y, w, h] = numbers[..] else { return None };
+    let rect = Rect::new(x, y, w, h);
+    (!rect.is_empty()).then_some(rect)
 }
 
 #[cfg(test)]
