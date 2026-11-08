@@ -110,7 +110,8 @@ impl ChromeTheme {
         Self {
             surface: surface.opacity(0.94),
             on_surface: made_readable_on(on_surface, surface),
-            on_surface_muted: made_readable_on(on_surface.opacity(0.7), surface),
+            // Blended opaque, so the contrast checked is the one seen (the check ignores opacity).
+            on_surface_muted: made_readable_on(opaque(css::mixed(surface, on_surface, 0.7)), surface),
             border: on_surface.opacity(0.12),
             separator: on_surface.opacity(0.15),
             hover: on_surface.opacity(0.12),
@@ -169,6 +170,10 @@ fn from_rgba(hex: u32) -> Hsla {
     Hsla::from(rgba(hex))
 }
 
+const fn opaque(colour: Hsla) -> Hsla {
+    Hsla { a: 1., ..colour }
+}
+
 /// The theme in use, once one was chosen.
 static CURRENT: RwLock<Option<ChromeTheme>> = RwLock::new(None);
 
@@ -205,6 +210,13 @@ mod tests {
     fn secondary_text_reads_on_the_bars_in_every_built_in_theme() {
         for theme in themes() {
             assert!(ratio(theme.on_surface_muted, theme.surface) >= READABLE);
+        }
+    }
+
+    #[test]
+    fn secondary_text_is_opaque_so_its_checked_contrast_is_the_one_seen() {
+        for theme in themes() {
+            assert!((theme.on_surface_muted.a - 1.).abs() < f32::EPSILON);
         }
     }
 

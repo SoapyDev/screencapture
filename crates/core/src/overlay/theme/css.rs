@@ -256,7 +256,8 @@ fn with_alpha(base: Hsla, function: &str, factor: f32) -> Hsla {
     }
 }
 
-fn mixed(first: Hsla, second: Hsla, share: f32) -> Hsla {
+/// `share` of the way from `first` to `second`, channel by channel.
+pub(super) fn mixed(first: Hsla, second: Hsla, share: f32) -> Hsla {
     let (a, b) = (Rgba::from(first), Rgba::from(second));
     let share = share.clamp(0., 1.);
     let blend = |from: f32, to: f32| (to - from).mul_add(share, from);

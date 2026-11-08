@@ -366,19 +366,23 @@ impl Side {
     /// Where `v` is between edges `lo` and `hi`; the closer edge wins when they are less than
     /// two slops apart.
     const fn of(v: i32, lo: i32, hi: i32) -> Self {
-        // Never more than a third of the span, so a small region keeps a middle to grab.
-        let reach = if (hi - lo) / 3 < HANDLE_SLOP {
-            (hi - lo) / 3
-        } else {
-            HANDLE_SLOP
-        };
         let (to_lo, to_hi) = ((v - lo).abs(), (v - hi).abs());
-        if to_lo <= reach && to_lo <= to_hi {
+        if to_lo <= Self::reach(v < lo, hi - lo) && to_lo <= to_hi {
             Self::Start
-        } else if to_hi <= reach {
+        } else if to_hi <= Self::reach(v > hi, hi - lo) {
             Self::End
         } else {
             Self::Between
+        }
+    }
+
+    /// How far from an edge a press grabs it: the whole slop outside the region; inside, never
+    /// more than a third of the `span`, so a small region keeps a middle to grab.
+    const fn reach(outside: bool, span: i32) -> i32 {
+        if outside || span / 3 >= HANDLE_SLOP {
+            HANDLE_SLOP
+        } else {
+            span / 3
         }
     }
 }
@@ -499,6 +503,15 @@ mod tests {
         s.release(190, 45);
         // 12 px outside the left edge: still the west handle (a 24 px target).
         assert_eq!(s.hit(-2, 25), Hit::Handle(Handle::W));
+    }
+
+    #[test]
+    fn a_small_region_keeps_its_handles_full_size_outside() {
+        let mut s = Selection::new(Mode::Region, monitors());
+        s.press(10, 10);
+        s.release(19, 40);
+        // 6 px outside a 9 px wide region: nothing there to keep a middle for.
+        assert_eq!(s.hit(4, 25), Hit::Handle(Handle::W));
     }
 
     #[test]

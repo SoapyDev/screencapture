@@ -168,8 +168,6 @@ pub struct Overlay {
     notice: Option<SharedString>,
     /// The drawers beside the features' action buttons.
     drawers: drawers::Drawers,
-    /// Where the action buttons rest, as last painted: the drawers need the room to their left.
-    action_anchor: Rc<std::cell::Cell<Option<Rect>>>,
 }
 
 /// How the program makes its features, in the order they are asked (and their actions shown):
@@ -627,7 +625,6 @@ impl Overlay {
             traced: std::cell::Cell::new(false),
             notice: None,
             drawers,
-            action_anchor: Rc::default(),
         }
     }
 
@@ -1022,7 +1019,6 @@ impl Overlay {
         }
     }
 
-    /// Click handlers for feature `index`.
     /// The pointer entered or left a part of feature `index`'s action button.
     pub(crate) fn drawer_hover(
         &mut self,
@@ -1064,6 +1060,7 @@ impl Overlay {
         .detach();
     }
 
+    /// Click handlers for feature `index`.
     fn act(overlay: &Entity<Self>, index: usize) -> Act {
         Act {
             overlay: overlay.clone(),
@@ -1126,6 +1123,9 @@ struct View {
     monitor: MonitorInfo,
     image: Option<Arc<RenderImage>>,
     focus: FocusHandle,
+    /// Where this window's action buttons rest, as last painted: their options bars centre on
+    /// them. One per window, as each screen paints its bar in its own place.
+    action_anchor: Rc<std::cell::Cell<Option<Rect>>>,
 }
 
 /// Dark rounded strip the toolbar rows are made of.
@@ -1167,6 +1167,7 @@ impl View {
             monitor,
             image,
             focus,
+            action_anchor: Rc::default(),
         }
     }
 
@@ -1313,7 +1314,7 @@ impl Render for View {
             .children(dims(o, monitor))
             .children(selection_marks(o, monitor))
             .children(over)
-            .children(bars(&self.overlay, o, monitor))
+            .children(bars(&self.overlay, o, monitor, &self.action_anchor))
             .child(pointer_listeners(self.overlay.clone(), monitor.rect))
     }
 }
@@ -1441,7 +1442,12 @@ fn screen_mark(picked: bool, hovered: bool, monitor: &MonitorInfo) -> Div {
 
 /// The toolbar and the action bar, on the screen under the pointer (all of them until the
 /// pointer is seen), hidden while dragging so they never get in the way.
-fn bars(overlay: &Entity<Overlay>, o: &Overlay, monitor: &MonitorInfo) -> Vec<AnyElement> {
+fn bars(
+    overlay: &Entity<Overlay>,
+    o: &Overlay,
+    monitor: &MonitorInfo,
+    anchor: &Rc<std::cell::Cell<Option<Rect>>>,
+) -> Vec<AnyElement> {
     let elsewhere = o.selection.hovered().is_some_and(|m| m.name != monitor.name);
     if o.busy() || elsewhere {
         return Vec::new();
@@ -1450,7 +1456,7 @@ fn bars(overlay: &Entity<Overlay>, o: &Overlay, monitor: &MonitorInfo) -> Vec<An
     let edge = layout::toolbar_edge(monitor.rect, o.selection.region());
     vec![
         toolbar(overlay, o, edge, leaving),
-        action_bar(overlay, o, monitor.rect, leaving),
+        action_bar(overlay, o, monitor.rect, anchor, leaving),
     ]
 }
 
@@ -1499,7 +1505,14 @@ fn main_row(overlay: &Entity<Overlay>, o: &Overlay) -> Div {
         .child(widgets::button("close", "✕", false).on_click(act(Overlay::cancel)))
 }
 
-fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, screen: Rect, leaving: bool) -> AnyElement {
+/// The action bar on `screen`, noting where its buttons are painted in `anchor`.
+fn action_bar(
+    overlay: &Entity<Overlay>,
+    o: &Overlay,
+    screen: Rect,
+    anchor: &Rc<std::cell::Cell<Option<Rect>>>,
+    leaving: bool,
+) -> AnyElement {
     let ctx = Ctx {
         selection: &o.selection,
     };
@@ -1508,7 +1521,7 @@ fn action_bar(overlay: &Entity<Overlay>, o: &Overlay, screen: Rect, leaving: boo
     let bar = actions::ActionBar {
         overlay,
         drawers: &o.drawers,
-        anchor: &o.action_anchor,
+        anchor,
         screen: local(screen, screen),
     };
     bar.render(actions.collect(), o.notice.as_ref(), leaving)

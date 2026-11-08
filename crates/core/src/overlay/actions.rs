@@ -105,8 +105,7 @@ impl ActionBar<'_> {
     /// Where the options bar of button `position` of `count` goes.
     fn placement(&self, position: usize, count: usize) -> Placement {
         let resting = self.anchor.get().unwrap_or(Rect::new(0, 0, 0, 0));
-        let center =
-            resting.x + resting.w * saturating_i32(position.to_f32() + 0.5) / saturating_i32(count.to_f32());
+        let center = button_center(resting, position, count);
         drawer::place_above(center, OPTIONS_WIDTH, self.screen, saturating_i32(EDGE_GAP))
     }
 
@@ -114,36 +113,32 @@ impl ActionBar<'_> {
     /// one row while they fit, then wrap. Only the bar catches the pointer, not the room
     /// around it.
     fn options(&self, index: usize, options: Vec<AnyElement>, placement: Placement) -> Div {
-        let overlay = self.overlay.clone();
-        let pinned = move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
-            overlay.update(cx, |overlay, cx| overlay.drawer_pressed(index, cx));
-        };
         let options = options.into_iter().map(|option| div().flex_none().child(option));
         let bar = super::panel()
             .id(("drawer", index))
             .rounded_full()
             .px_2()
-            .flex_none();
-        let bar = bar
+            .flex_none()
             .max_w(px(placement.width.to_f32()))
             .flex_wrap()
             .on_hover(self.hover_listener(index, Part::Drawer))
             .on_mouse_move(self.moved_listener(index))
-            .on_mouse_down(MouseButton::Left, pinned)
+            .on_mouse_down(MouseButton::Left, self.pressed_listener(index))
             .children(options)
             .with_animation(
                 ("drawer-in", index),
                 Animation::new(super::motion::slide()).with_easing(ease_in_out),
                 |bar, delta| bar.opacity(delta).relative().top(px(RISE * (1. - delta))),
             );
-        let sideways = div().relative().left(px(placement.shift.to_f32())).child(bar);
-        let above = div()
-            .absolute()
-            .bottom_full()
-            .left_0()
-            .right_0()
-            .pb(px(drawer::GAP.to_f32()));
-        above.flex().justify_center().child(sideways)
+        above_the_button(bar.into_any_element(), placement)
+    }
+
+    /// A press inside the bar pins it open.
+    fn pressed_listener(&self, index: usize) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        let overlay = self.overlay.clone();
+        move |_, _, cx| {
+            overlay.update(cx, |overlay, cx| overlay.drawer_pressed(index, cx));
+        }
     }
 
     /// Moving over the bar says the pointer is on it, in case the enter was missed.
@@ -162,6 +157,27 @@ impl ActionBar<'_> {
             overlay.update(cx, |overlay, cx| overlay.drawer_hover(index, part, *hovered, cx));
         }
     }
+}
+
+/// `bar` centred above its button, slid sideways as `placement` says.
+fn above_the_button(bar: AnyElement, placement: Placement) -> Div {
+    let sideways = div().relative().left(px(placement.shift.to_f32())).child(bar);
+    let above = div()
+        .absolute()
+        .bottom_full()
+        .left_0()
+        .right_0()
+        .pb(px(drawer::GAP.to_f32()));
+    above.flex().justify_center().child(sideways)
+}
+
+/// The centre of button `position` of `count` side by side on the bar `resting` covers.
+fn button_center(resting: Rect, position: usize, count: usize) -> i32 {
+    if count == 0 {
+        return resting.x + resting.w / 2;
+    }
+    let share = (position.to_f32() + 0.5) / count.to_f32();
+    resting.x + saturating_i32(resting.w.to_f32() * share)
 }
 
 /// Note where the buttons are; when that changed, draw again with the room they need.
@@ -203,4 +219,26 @@ pub fn slide(place: Div, edge: Edge, offset: f32, leaving: bool, id: &'static st
         at(place, SLIDE_DISTANCE * delta)
     });
     animated.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BAR: Rect = Rect::new(100, 0, 200, 60);
+
+    #[test]
+    fn the_first_of_two_buttons_centres_on_the_left_half() {
+        assert_eq!(button_center(BAR, 0, 2), 150);
+    }
+
+    #[test]
+    fn the_second_of_two_buttons_centres_on_the_right_half() {
+        assert_eq!(button_center(BAR, 1, 2), 250);
+    }
+
+    #[test]
+    fn a_lone_button_centres_on_the_bar() {
+        assert_eq!(button_center(BAR, 0, 1), 200);
+    }
 }

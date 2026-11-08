@@ -34,8 +34,9 @@ pub fn readable_on(background: Hsla) -> Hsla {
 /// Gives up at the extreme, which is the best that can be done.
 #[must_use]
 pub fn made_readable_on(foreground: Hsla, background: Hsla) -> Hsla {
-    let lighter = luminance(background) < 0.5;
-    let target = if lighter { 1. } else { 0. };
+    // Toward whichever extreme reads better: a mid-tone background can be too light for white
+    // to ever read on it, though it is darker than half.
+    let target = if is_dark(background) { 1. } else { 0. };
     let mut fixed = foreground;
     for _ in 0..20 {
         if ratio(fixed, background) >= READABLE {
@@ -106,6 +107,13 @@ mod tests {
     fn a_colour_that_already_reads_is_left_alone() {
         let colour = hsla(0.1, 0.5, 0.8, 1.);
         assert_eq!(made_readable_on(colour, black()), colour);
+    }
+
+    #[test]
+    fn a_text_on_a_mid_grey_is_darkened_until_it_reads() {
+        let mid_grey = hsla(0., 0., 0.58, 1.);
+        let fixed = made_readable_on(hsla(0., 0., 0.5, 1.), mid_grey);
+        assert!(ratio(fixed, mid_grey) >= READABLE);
     }
 
     #[test]
