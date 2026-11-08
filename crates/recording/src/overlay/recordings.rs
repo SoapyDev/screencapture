@@ -130,7 +130,15 @@ fn setting_button<T: Choice>(
     field: fn(&mut Settings) -> &mut T,
 ) -> Stateful<Div> {
     let cycle = act.on(move |me: &mut Recordings, _| me.cycle_setting(field));
-    widgets::button(id, value.label(), false).on_click(cycle)
+    widgets::steady_button(id, value.label(), widest_label::<T>(), false).on_click(cycle)
+}
+
+/// The longest label the setting can show: its button never gets narrower or wider than that.
+fn widest_label<T: Choice>() -> String {
+    let labels = T::value_variants().iter().map(|value| value.label());
+    labels
+        .max_by_key(|label| label.chars().count())
+        .unwrap_or_default()
 }
 
 /// What recording the selection means. Picking every screen is "all".
@@ -216,6 +224,11 @@ mod tests {
     fn the_record_button_summarises_format_resolution_and_rate() {
         let summary = Recordings::new(Recording::default()).summary();
         assert_eq!(summary, "MP4 · AV1 · Native · Native fps");
+    }
+
+    #[test]
+    fn the_widest_fps_label_is_the_longest_one() {
+        assert_eq!(widest_label::<crate::settings::Fps>(), "FPS Adaptive");
     }
 
     #[test]

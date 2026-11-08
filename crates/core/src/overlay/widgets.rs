@@ -14,6 +14,30 @@ pub fn color(c: [u8; 4]) -> gpui::Rgba {
 }
 
 pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, active: bool) -> Stateful<Div> {
+    shell(id, active).child(label.into())
+}
+
+/// A button whose size is that of `widest` (the longest text it will ever show), so changing
+/// its `label` never moves what is beside it.
+pub fn steady_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    widest: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    let sizer = div().invisible().child(widest.into());
+    let shown = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(label.into());
+    shell(id, active).relative().child(sizer).child(shown)
+}
+
+/// The look of a button, without its text.
+fn shell(id: impl Into<SharedString>, active: bool) -> Stateful<Div> {
     let theme = theme::current();
     div()
         .id(id.into())
@@ -26,7 +50,6 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, activ
             |d| d.bg(theme.accent).text_color(theme.on_accent),
             |d| d.hover(|d| d.bg(theme.hover)),
         )
-        .child(label.into())
 }
 
 /// Diameter of the big round action buttons.
