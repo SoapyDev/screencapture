@@ -7,16 +7,12 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui::{AnyWindowHandle, App};
 
-use crate::drawings::Shared;
+use screencapture_core::drawings::Shared;
 
 /// What to show for a recording.
 #[derive(Clone)]
-#[cfg_attr(
-    not(all(target_os = "linux", feature = "wayland")),
-    expect(dead_code, reason = "the frame needs layer-shell")
-)]
 pub struct Spec {
-    pub on_screen: crate::record::OnScreen,
+    pub on_screen: crate::OnScreen,
     pub drawings: Option<Shared>,
 }
 
@@ -52,10 +48,14 @@ mod view {
     };
 
     use super::{Shown, Spec};
-    use crate::{
+    use screencapture_core::{
         capture::{MonitorInfo, Rect},
-        overlay::{controls, layout},
-        record::frame::{self, Surface},
+        overlay::layout,
+    };
+
+    use crate::{
+        frame::{self, Surface},
+        overlay::controls,
     };
 
     const RED: Hsla = Hsla {

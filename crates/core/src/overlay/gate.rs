@@ -5,8 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// After the overlay ends, how long until the screens no longer show it: gpui still has to
-/// destroy the surfaces, and the compositor to process that and repaint (a frame or two; more with a layer
+/// After the overlay ends, how long until the screens no longer show it.
+///
+/// gpui still has to destroy the surfaces, and the compositor to process that and repaint (a frame or two; more with a layer
 /// fade-out animation, which the README's `no_anim` rule turns off).
 pub const SETTLE: Duration = Duration::from_millis(100);
 
@@ -27,6 +28,7 @@ struct State {
 }
 
 impl Gate {
+    #[must_use]
     pub const fn new() -> Self {
         Self(Mutex::new(State {
             open: false,
@@ -68,6 +70,12 @@ impl Gate {
     /// The request ended before any overlay showed.
     pub fn abort(&self) {
         self.state().open = false;
+    }
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

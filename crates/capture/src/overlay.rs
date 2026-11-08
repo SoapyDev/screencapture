@@ -4,16 +4,19 @@ use std::path::PathBuf;
 
 use gpui::{AnyElement, Keystroke, prelude::*};
 
-use super::{
-    feature::{Act, Actions, Ctx, Effect, Feature, SaveJob},
-    folder, widgets,
-};
-use crate::{
+use screencapture_core::{
     capture::Rect,
-    job,
-    save::{self, Screenshots},
+    overlay::{
+        feature::{Act, Actions, Ctx, Effect, Feature, SaveJob},
+        folder, report_unremembered, widgets,
+    },
     selection::{Mode, Request},
     trace,
+};
+
+use crate::{
+    job,
+    save::{self, Screenshots},
 };
 
 pub struct Capturing {
@@ -22,6 +25,7 @@ pub struct Capturing {
 }
 
 impl Capturing {
+    #[must_use]
     pub const fn new(screenshots: Screenshots) -> Self {
         Self { screenshots }
     }
@@ -39,7 +43,10 @@ impl Capturing {
 
     fn chosen(&mut self, dir: PathBuf) {
         self.screenshots.output_dir = Some(dir);
-        super::report_unremembered(crate::config::remember(&self.screenshots), "the folder");
+        report_unremembered(
+            screencapture_core::config::remember(&self.screenshots),
+            "the folder",
+        );
     }
 
     fn folder_label(&self) -> String {
@@ -54,7 +61,7 @@ fn save_job(dir: PathBuf) -> SaveJob {
         trace("composed");
         let saved = save::save_png(&image, &dir, chrono::Local::now())?;
         trace("saved");
-        crate::clipboard::copy_png(saved.png);
+        screencapture_core::clipboard::copy_png(saved.png);
         trace("copied");
         Ok(saved.path)
     })

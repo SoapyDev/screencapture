@@ -1,5 +1,4 @@
 mod cli;
-mod overlay;
 
 #[cfg(all(target_os = "linux", not(any(feature = "wayland", feature = "x11"))))]
 compile_error!("enable at least one of the `wayland` or `x11` features");
@@ -8,11 +7,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use screencapture_capture::{job, save};
-use screencapture_core::{capture, clipboard, config, drawings, memory, selection};
 #[cfg(unix)]
-use screencapture_core::{daemon, hyprland};
+use screencapture_core::daemon;
+use screencapture_core::{capture, clipboard, config, memory, overlay, selection};
 pub use screencapture_core::{trace, trace_restart};
-use screencapture_editing::{annotate, text};
 use screencapture_recording as record;
 
 use crate::{
@@ -55,10 +53,10 @@ fn main() -> ExitCode {
 fn features() -> Vec<Box<dyn overlay::feature::Feature>> {
     let config = config::Config::load();
     vec![
-        Box::new(overlay::editing::Editing::new(config.section())),
+        Box::new(screencapture_editing::overlay::Editing::new(config.section())),
         #[cfg(target_os = "linux")]
-        Box::new(overlay::recordings::Recordings::new(config.section())),
-        Box::new(overlay::capturing::Capturing::new(config.section())),
+        Box::new(record::overlay::Recordings::new(config.section())),
+        Box::new(screencapture_capture::overlay::Capturing::new(config.section())),
     ]
 }
 
@@ -66,11 +64,7 @@ fn features() -> Vec<Box<dyn overlay::feature::Feature>> {
 #[cfg(unix)]
 fn run_daemon(listener: std::os::unix::net::UnixListener) {
     #[cfg(target_os = "linux")]
-    overlay::run_daemon(
-        listener,
-        overlay::recording_service::Recording::default(),
-        features,
-    );
+    overlay::run_daemon(listener, record::overlay::service::Recording::default(), features);
     #[cfg(not(target_os = "linux"))]
     overlay::run_daemon(listener, overlay::service::NoService, features);
 }
@@ -156,7 +150,7 @@ fn record(command: record::command::Command) -> ExitCode {
                 reply: daemon::Reply::NotRecording,
                 notes: Vec::new(),
             }),
-            None => overlay::launch::with_recording_frame(move |show| {
+            None => record::overlay::launch::with_recording_frame(move |show| {
                 record::foreground::run(command, &socket, show)
             })
             .map(|outcome| {

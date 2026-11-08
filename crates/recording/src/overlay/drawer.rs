@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::capture::Rect;
+use screencapture_core::capture::Rect;
 
 /// Pointer rest on the strip before the drawer opens: passing through doesn't open it.
 pub const DWELL: Duration = Duration::from_millis(150);

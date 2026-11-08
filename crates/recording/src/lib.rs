@@ -22,6 +22,8 @@ pub use control::{Env, LiveEnv, OnScreen, Outcome, Recorder};
 
 #[cfg(target_os = "linux")]
 mod control;
+#[cfg(target_os = "linux")]
+pub mod overlay;
 
 /// A request to the daemon, recording ones included.
 #[cfg(unix)]

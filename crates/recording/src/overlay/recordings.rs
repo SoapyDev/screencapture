@@ -5,18 +5,19 @@ use std::path::PathBuf;
 
 use gpui::{AnyElement, App, Div, Keystroke, SharedString, Stateful, prelude::*};
 
-use super::{
-    feature::{Act, Actions, Ctx, Effect, Feature, HandOver},
-    folder, widgets,
-};
-use crate::{
+use screencapture_core::{
     capture::Rect,
-    record::{
-        command::Command,
-        plan::{self, Target},
-        settings::{Choice, Overrides, Recording, Settings},
+    overlay::{
+        feature::{Act, Actions, Ctx, Effect, Feature, HandOver},
+        folder, mark_saved, report_unremembered, separator, widgets,
     },
     selection::{Request, Selection},
+};
+
+use crate::{
+    command::Command,
+    plan::{self, Target},
+    settings::{Choice, Overrides, Recording, Settings},
 };
 
 pub struct Recordings {
@@ -25,6 +26,7 @@ pub struct Recordings {
 }
 
 impl Recordings {
+    #[must_use]
     pub const fn new(recording: Recording) -> Self {
         Self { recording }
     }
@@ -55,8 +57,8 @@ impl Recordings {
     fn cycle_setting<T: Choice>(&mut self, field: fn(&mut Settings) -> &mut T) -> Effect {
         let value = field(&mut self.recording.record);
         *value = value.next();
-        let saved = crate::config::remember(&self.recording);
-        super::report_unremembered(saved, "the recording settings");
+        let saved = screencapture_core::config::remember(&self.recording);
+        report_unremembered(saved, "the recording settings");
         Effect::Repaint
     }
 
@@ -66,7 +68,10 @@ impl Recordings {
 
     fn chosen(&mut self, dir: PathBuf) {
         self.recording.video_dir = Some(dir);
-        super::report_unremembered(crate::config::remember(&self.recording), "the folder");
+        report_unremembered(
+            screencapture_core::config::remember(&self.recording),
+            "the folder",
+        );
     }
 
     fn folder_label(&self) -> String {
@@ -95,13 +100,13 @@ fn launch(command: Command, hand: HandOver, cx: &mut App) {
 }
 
 /// The end of a recording started from a standalone overlay: like a saved capture, print it.
-fn report_standalone(outcome: anyhow::Result<crate::record::Outcome>) {
+fn report_standalone(outcome: anyhow::Result<crate::Outcome>) {
     match outcome {
-        Ok(crate::record::Outcome::Saved(path)) => {
-            super::mark_saved();
+        Ok(crate::Outcome::Saved(path)) => {
+            mark_saved();
             println!("{}", path.display());
         }
-        Ok(crate::record::Outcome::Failed(e)) => eprintln!("screencapture: {e}"),
+        Ok(crate::Outcome::Failed(e)) => eprintln!("screencapture: {e}"),
         Ok(other) => eprintln!("screencapture: recording: {other:?}"),
         Err(e) => eprintln!("screencapture: {e:#}"),
     }
@@ -149,7 +154,7 @@ impl Feature for Recordings {
         Actions {
             main: vec![record.into_any_element()],
             settings: settings
-                .chain([super::separator().into_any_element(), videos.into_any_element()])
+                .chain([separator().into_any_element(), videos.into_any_element()])
                 .collect::<Vec<AnyElement>>(),
         }
     }

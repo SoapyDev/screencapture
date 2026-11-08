@@ -5,6 +5,7 @@ use gpui::{App, CursorStyle, Div, Entity, SharedString, Stateful, Window, div, h
 use super::{ACCENT, Overlay};
 
 /// A colour as gpui takes it.
+#[must_use]
 pub fn color(c: [u8; 4]) -> gpui::Rgba {
     rgba(u32::from_be_bytes(c))
 }

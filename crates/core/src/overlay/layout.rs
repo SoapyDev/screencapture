@@ -4,6 +4,7 @@ use crate::capture::{MonitorInfo, Rect};
 
 /// Areas of a monitor to darken so the selection (global coords) stays clear.
 /// Returned rects are local to the monitor.
+#[must_use]
 pub fn dim_rects(monitor: Rect, selection: Option<Rect>) -> Vec<Rect> {
     let local = Rect::new(0, 0, monitor.w, monitor.h);
     let Some(hole) = selection.and_then(|s| s.intersect(monitor)) else {
@@ -21,10 +22,12 @@ pub fn dim_rects(monitor: Rect, selection: Option<Rect>) -> Vec<Rect> {
     .collect()
 }
 
-/// Which monitor a gpui display shows. gpui reports Wayland displays at their
-/// `wl_output.geometry` position, possibly divided by an integer scale: the smallest scale
+/// Which monitor a gpui display shows.
+///
+/// gpui reports Wayland displays at their `wl_output.geometry` position, possibly divided by an integer scale: the smallest scale
 /// that fits wins (side by side, one screen's position halved can be another's), then the
 /// logical position, then the nearest.
+#[must_use]
 pub fn match_display(origin: (i32, i32), monitors: &[MonitorInfo]) -> Option<usize> {
     let at_scale = |scale: i32| {
         let scaled = |m: &MonitorInfo| (m.output_position.0 / scale, m.output_position.1 / scale);
@@ -53,6 +56,7 @@ pub enum Edge {
 
 /// Where the toolbar goes on `monitor` so it doesn't hide the region being adjusted: the top,
 /// unless the region reaches into the top band and leaves the bottom one free.
+#[must_use]
 pub fn toolbar_edge(monitor: Rect, region: Option<Rect>) -> Edge {
     let band = |y| Rect::new(monitor.x, y, monitor.w, TOOLBAR_BAND);
     let hits = |b: Rect| region.and_then(|r| r.intersect(b)).is_some();

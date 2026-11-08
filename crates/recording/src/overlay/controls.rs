@@ -9,15 +9,18 @@ use gpui::{
     ease_in_out, prelude::*, px, rgba,
 };
 
+use screencapture_core::overlay::{actions, panel, separator, widgets};
+
 use super::{
     drawer::{self, Change, Drawer},
-    recording, widgets,
+    frame as recording,
 };
-use crate::{
+use screencapture_core::{
     capture::MonitorInfo,
     daemon::{self, Request},
-    record::{OnScreen, command::Command},
 };
+
+use crate::{OnScreen, command::Command};
 
 /// What the strips and the drawer share.
 pub struct Controls {
@@ -176,11 +179,11 @@ impl Render for DrawerView {
         let controls = self.controls.read(cx);
         let clock = drawer::clock(controls.started.elapsed());
         let summary = controls.summary.clone();
-        let panel = super::panel()
+        let panel = panel()
             .child(div().size(px(10.)).rounded_full().bg(rgba(0xff4d4dff)))
             .child(div().px_2().child(clock))
             .child(div().px_2().text_color(rgba(0xffffffa0)).child(summary))
-            .child(super::separator())
+            .child(separator())
             .child(command_button(&self.controls, "stop", "■ Stop", Command::Stop))
             .child(command_button(
                 &self.controls,
@@ -188,7 +191,7 @@ impl Render for DrawerView {
                 "✕ Discard",
                 Command::Discard,
             ));
-        let slide_in = Animation::new(super::actions::SLIDE).with_easing(ease_in_out);
+        let slide_in = Animation::new(actions::SLIDE).with_easing(ease_in_out);
         div()
             .id("drawer")
             .size_full()

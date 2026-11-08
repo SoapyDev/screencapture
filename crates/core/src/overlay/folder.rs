@@ -26,6 +26,7 @@ fn prompt(what: &str, dir: &Path) -> String {
 }
 
 /// `dir` for a button: the home folder written `~`.
+#[must_use]
 pub fn shown(dir: &Path) -> String {
     shortened(dir, dirs::home_dir().as_deref())
 }

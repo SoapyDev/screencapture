@@ -41,10 +41,6 @@ pub trait Service: Send + 'static {
 }
 
 /// Nothing besides the overlay.
-#[cfg_attr(
-    target_os = "linux",
-    expect(dead_code, reason = "used once recording can be left out of the build")
-)]
 pub struct NoService;
 
 impl Service for NoService {

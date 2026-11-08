@@ -11,6 +11,7 @@ pub mod drawings;
 pub mod hyprland;
 pub mod memory;
 pub mod naming;
+pub mod overlay;
 pub mod selection;
 pub mod trace;
 

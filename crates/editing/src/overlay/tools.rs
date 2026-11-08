@@ -8,11 +8,13 @@ use gpui::{
     StrokeOptions, Window, div, hsla, point, prelude::*, px, size,
 };
 
-use super::{
-    editing::Editing,
+use screencapture_core::overlay::{
     feature::{Act, Effect},
+    panel, render_image, separator,
     widgets::{button, color},
 };
+
+use super::editing::Editing;
 use crate::annotate::{self, Color, Shape, Target, Tool};
 
 /// Everything a rendered text box depends on.
@@ -53,7 +55,7 @@ impl TextKey {
         for px in image.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
-        Arc::new(super::render_image(image::Frame::new(image)))
+        Arc::new(render_image(image::Frame::new(image)))
     }
 }
 
@@ -101,7 +103,7 @@ fn swatch(id: String, c: Color, selected: bool) -> Stateful<Div> {
 }
 
 pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
-    let mut row = super::panel();
+    let mut row = panel();
     for (i, tool) in Tool::ALL.into_iter().enumerate() {
         let glyph = match tool {
             Tool::Rectangle => "□",
@@ -122,7 +124,7 @@ pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
             .on_click(edit(act, move |e| e.toggle_tool(tool))),
         );
     }
-    row = row.child(super::separator());
+    row = row.child(separator());
     for (i, &c) in bar.palette.iter().enumerate() {
         row = row.child(
             swatch(format!("color-{i}"), c, c == bar.color).on_click(edit(act, move |e| e.set_color(c))),
@@ -137,7 +139,7 @@ pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
         .child(button("picker", "＋", bar.picker.is_some()).on_click(edit(act, Editing::toggle_picker)))
         .when(bar.text, |row| {
             // Which colour the palette sets, and whether the box has a background.
-            row.child(super::separator())
+            row.child(separator())
                 .child(
                     button("ink", "A text", bar.target == Target::Ink)
                         .on_click(edit(act, |e| e.set_target(Target::Ink))),
@@ -155,7 +157,7 @@ pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
                     .on_click(edit(act, Editing::toggle_fill)),
                 )
         })
-        .child(super::separator())
+        .child(separator())
         // Width (font size for text) stepper; the mouse wheel does the same.
         .child(button("thinner", "−", false).on_click(edit(act, |e| e.step_width(-1.))))
         .child(
@@ -166,7 +168,7 @@ pub fn drawing_row(act: &Act, bar: &DrawBar) -> Div {
                 .child(format!("{} px", bar.width)),
         )
         .child(button("thicker", "+", false).on_click(edit(act, |e| e.step_width(1.))))
-        .child(super::separator())
+        .child(separator())
         .child(button("undo", "↶", false).on_click(edit(act, Editing::undo)));
     if bar.has_selection {
         row = row.child(button("delete", "🗑 Del", false).on_click(edit(act, Editing::delete_selected)));
@@ -212,7 +214,7 @@ pub fn picker(act: &Act, hue: f32, current: Color) -> Div {
         }
         grid = grid.child(line);
     }
-    super::panel()
+    panel()
         .flex_col()
         .items_start()
         .p_2()

@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 gpui.workspace = true
+gpui_platform.workspace = true
+futures.workspace = true
+smallvec.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
@@ -33,9 +36,11 @@ xcap.workspace = true
 # Alone (its own tests), the core builds for Wayland; the program picks through its features.
 default = ["wayland"]
 # Native wlr-screencopy capture and the Wayland clipboard.
-wayland = ["dep:memmap2", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr"]
+wayland = [
+    "gpui_platform/wayland",
+    "dep:memmap2", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr"]
 # xcap capture.
-x11 = ["dep:xcap"]
+x11 = ["gpui_platform/x11", "dep:xcap"]
 
 [dev-dependencies]
 tempfile.workspace = true

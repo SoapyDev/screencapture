@@ -2,4 +2,5 @@
 //! colours offered, and how they are painted into a capture.
 
 pub mod annotate;
+pub mod overlay;
 pub mod text;

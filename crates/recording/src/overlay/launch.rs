@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use futures::StreamExt;
 use gpui::{App, AppContext, Global};
 
-use super::recording::{self, Shown, Spec};
-use crate::{
+use screencapture_core::{
     daemon::{self, Reply, Request},
     drawings::Shared,
-    record::{OnScreen, command::Command, foreground::ShowFrame},
+    overlay::gate::SETTLE,
 };
+
+use super::frame::{self as recording, Shown, Spec};
+use crate::{OnScreen, command::Command, foreground::ShowFrame};
 
 /// Drawings made in the overlay, waiting for the frame of the recording it started (UI thread).
 #[derive(Default)]
@@ -70,8 +72,8 @@ pub fn through_daemon(
     cx.set_global(FrameDrawings(drawings));
     cx.spawn(async move |cx| {
         // Until the overlay is off the screens.
-        cx.background_executor().timer(super::gate::SETTLE).await;
-        let request: crate::record::Request = Request::Feature(command);
+        cx.background_executor().timer(SETTLE).await;
+        let request: crate::Request = Request::Feature(command);
         let answer = cx
             .background_spawn(async move { daemon::send(&daemon::socket_path(), &request) })
             .await;
@@ -144,16 +146,12 @@ pub fn with_recording_frame<R: Send + 'static>(work: impl FnOnce(ShowFrame) -> R
 pub fn in_this_process(
     command: Command,
     drawings: Option<Shared>,
-    report: impl FnOnce(anyhow::Result<crate::record::Outcome>) + Send + 'static,
+    report: impl FnOnce(anyhow::Result<crate::Outcome>) + Send + 'static,
     cx: &mut App,
 ) {
     let work = move |show: ShowFrame| {
-        std::thread::sleep(super::gate::SETTLE);
-        report(crate::record::foreground::run(
-            command,
-            &daemon::socket_path(),
-            show,
-        ));
+        std::thread::sleep(SETTLE);
+        report(crate::foreground::run(command, &daemon::socket_path(), show));
     };
     drive_frames(drawings, work, cx);
 }

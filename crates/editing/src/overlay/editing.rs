@@ -11,18 +11,21 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::{
-    ACCENT,
-    feature::{Act, Ctx, Effect, Feature, Point},
-    handle_div, keys, local, rect_div,
-    tools::{self, TextKey},
-    widgets,
-};
-use crate::{
-    annotate::{self, Annotations, Color, Grab, Palette, Shape, Target, Tool},
+use screencapture_core::{
     capture::{MonitorInfo, Rect},
     drawings::Shared,
+    overlay::{
+        ACCENT,
+        feature::{Act, Ctx, Effect, Feature, Point},
+        handle_div, local, rect_div, report_unremembered, widgets,
+    },
 };
+
+use super::{
+    keys,
+    tools::{self, TextKey},
+};
+use crate::annotate::{self, Annotations, Color, Grab, Palette, Shape, Target, Tool};
 
 pub struct Editing {
     annotations: Annotations,
@@ -41,6 +44,7 @@ pub struct Editing {
 }
 
 impl Editing {
+    #[must_use]
     pub fn new(palette: Palette) -> Self {
         Self {
             annotations: Annotations::default(),
@@ -97,7 +101,7 @@ impl Editing {
     pub(super) fn pick_custom(&mut self, color: Color) {
         self.picker = None;
         self.palette.custom_color = Some(annotate::to_hex(color));
-        super::report_unremembered(crate::config::remember(&self.palette), "the colour");
+        report_unremembered(screencapture_core::config::remember(&self.palette), "the colour");
         self.set_color(color);
     }
 

@@ -1,4 +1,4 @@
-//! The editing feature's drawings, as other features see them (see [`crate::drawings`]).
+//! The editing feature's drawings, as other features see them (see [`screencapture_core::drawings`]).
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -8,12 +8,13 @@ use gpui::{
 };
 use image::RgbaImage;
 
-use super::tools;
-use crate::{
-    annotate::{Shape, Tool},
+use screencapture_core::{
     capture::Rect,
     drawings::{Drawings, Shared},
 };
+
+use super::tools;
+use crate::annotate::{Shape, Tool};
 
 /// Shapes drawn in the overlay, kept after it closes.
 pub struct Drawn(Arc<[Shape]>);

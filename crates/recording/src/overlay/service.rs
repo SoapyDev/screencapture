@@ -3,14 +3,12 @@
 
 use std::time::Duration;
 
-use super::{
-    launch,
-    service::{Service, Ui},
-};
-use crate::{
-    daemon::{Client, Reply},
-    record::{LiveEnv, Outcome, Recorder, command::Command},
-};
+use screencapture_core::overlay::service::{Service, Ui};
+
+use super::launch;
+use screencapture_core::daemon::{Client, Reply};
+
+use crate::{LiveEnv, Outcome, Recorder, command::Command};
 
 /// How often the daemon checks on a running recorder (it may quit by itself).
 const WATCH_RECORDER: Duration = Duration::from_millis(250);

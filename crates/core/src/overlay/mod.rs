@@ -9,30 +9,14 @@
 //! Latency: the capture runs on its own thread, overlapping gpui start-up when standalone; in
 //! the daemon it is the only work done before the windows open.
 
-mod actions;
-pub mod capturing;
-#[cfg(all(target_os = "linux", feature = "wayland"))]
-mod controls;
-#[cfg(all(target_os = "linux", feature = "wayland"))]
-mod drawer;
-mod drawn;
-pub mod editing;
+pub mod actions;
 pub mod feature;
-mod folder;
+pub mod folder;
 #[cfg(unix)]
-mod gate;
-mod keys;
-#[cfg(target_os = "linux")]
-pub mod launch;
+pub mod gate;
 pub mod layout;
-mod recording;
-#[cfg(target_os = "linux")]
-pub mod recording_service;
-#[cfg(target_os = "linux")]
-pub mod recordings;
 #[cfg(unix)]
 pub mod service;
-mod tools;
 pub mod widgets;
 
 use std::{
@@ -113,7 +97,8 @@ impl Frozen {
 
 /// A gpui image owning `frame`'s pixels. (Not `SmallVec::from_elem`: that clones the frame,
 /// a full extra copy of a screen.)
-fn render_image(frame: image::Frame) -> RenderImage {
+#[must_use]
+pub fn render_image(frame: image::Frame) -> RenderImage {
     let mut frames = SmallVec::new();
     frames.push(frame);
     RenderImage::new(frames)
@@ -1013,7 +998,8 @@ struct View {
 }
 
 /// Dark rounded strip the toolbar rows are made of.
-fn panel() -> Div {
+#[must_use]
+pub fn panel() -> Div {
     div()
         .occlude()
         .flex()
@@ -1028,7 +1014,8 @@ fn panel() -> Div {
         .text_color(hsla(0., 0., 0.92, 1.))
 }
 
-fn separator() -> Div {
+#[must_use]
+pub fn separator() -> Div {
     div().w(px(1.)).h(px(20.)).mx_1().bg(hsla(0., 0., 1., 0.15))
 }
 
@@ -1102,7 +1089,7 @@ impl View {
     }
 }
 
-const ACCENT: Hsla = Hsla {
+pub const ACCENT: Hsla = Hsla {
     h: 0.58,
     s: 0.85,
     l: 0.55,
@@ -1117,7 +1104,8 @@ const DIM: Hsla = Hsla {
 /// Side of the square resize handles, in logical px.
 const HANDLE: i32 = 8;
 
-fn rect_div(r: Rect) -> Div {
+#[must_use]
+pub fn rect_div(r: Rect) -> Div {
     div()
         .absolute()
         .left(px(r.x as f32))
@@ -1126,7 +1114,8 @@ fn rect_div(r: Rect) -> Div {
         .h(px(r.h as f32))
 }
 
-fn handle_div(x: i32, y: i32) -> Div {
+#[must_use]
+pub fn handle_div(x: i32, y: i32) -> Div {
     rect_div(Rect::new(x - HANDLE / 2, y - HANDLE / 2, HANDLE, HANDLE))
         .bg(gpui::white())
         .border_1()
@@ -1142,7 +1131,8 @@ fn to_global(monitor: Rect, p: Point<Pixels>) -> feature::Point {
 }
 
 /// `rect` relative to `monitor`'s top-left.
-const fn local(rect: Rect, monitor: Rect) -> Rect {
+#[must_use]
+pub const fn local(rect: Rect, monitor: Rect) -> Rect {
     Rect {
         x: rect.x - monitor.x,
         y: rect.y - monitor.y,
