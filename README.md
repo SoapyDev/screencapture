@@ -18,7 +18,7 @@ X11), since its own offer would vanish when it exits. `SCREENCAPTURE_NO_CLIPBOAR
 | Linux, wlroots-style Wayland compositor (Hyprland, Sway, river, niri, Wayfire, labwc…) | Full support, default build: native screencopy, layer-shell overlay, native clipboard. Tested on Hyprland. |
 | KDE Plasma (Wayland) | Build with `--features x11`: KWin has no screencopy, so capture goes through xcap and the desktop portal (slower). Overlay and clipboard should work. Untested. |
 | GNOME (Wayland) | Build with `--features x11`, as above. No layer-shell, so the overlay is a fullscreen popup; the clipboard goes through `wl-copy`. Untested. |
-| X11 (any distro) | Build with `--no-default-features --features x11`. The overlay does not handle several monitors yet. |
+| X11 (any distro) | Build with `--no-default-features --features x11,capture,editing,recording`. The overlay does not handle several monitors yet. |
 | macOS, Windows | Code paths exist (gpui and xcap support both), but it has never been built or run there, and there is no clipboard copy. |
 
 The overlay starts at the pointer's position only on Hyprland (read through its IPC); elsewhere
@@ -241,8 +241,25 @@ layerrule = noanim, screencapture
 |---|---|---|
 | `wayland` | yes | gpui Wayland backend (layer-shell overlay) + native `wlr-screencopy` capture |
 | `x11` | no | gpui X11 backend + [`xcap`](https://crates.io/crates/xcap) capture |
+| `capture` | yes | Screenshots: Enter in the overlay, `region -g`, `screen NAMES`, `all` |
+| `editing` | yes | Drawing over the screens before a screenshot or a recording |
+| `recording` | yes | Screen recording: V in the overlay, `record …` |
 
-Code for a disabled feature is not compiled (`cargo tree` of the default build has no X11 crates).
+Any of `capture`, `editing` and `recording` can be left out: for example
+`cargo build --release --no-default-features --features wayland,capture` makes a screenshot tool
+with no drawing and no recording. The command line then offers only what was built in. Code for a
+disabled feature is not compiled (`cargo tree` of the default build has no X11 crates).
+
+The code is a cargo workspace, one crate per part:
+
+| Crate | Holds |
+|---|---|
+| `crates/core` | The screens and their capture, the selection, the config, the daemon, and the overlay's shell, which the features plug into |
+| `crates/capture` | Composing and saving screenshots |
+| `crates/editing` | The drawing tools and how drawings are painted |
+| `crates/recording` | Recording: the plan, the recorders, joining screens, the frame and controls |
+
+The program itself (`src/`) is the command line and the list of features it was built with.
 With both enabled, `SCREENCAPTURE_BACKEND=xcap` forces xcap. Windows and macOS always use xcap.
 
 Native screencopy exists because xcap 0.9's wlroots path fails on Hyprland (`wl_shm` invalid
@@ -251,15 +268,17 @@ don't offer screencopy; they need the `x11` feature (xcap goes through their por
 
 ## Development
 
-Nightly toolchain (`rust-toolchain.toml`) with Polonius (`-Zpolonius=next`), applied to this crate
-only through `profile-rustflags`. Developed test-first.
+Nightly toolchain (`rust-toolchain.toml`) with Polonius (`-Zpolonius=next`), applied to the
+workspace's crates only through `profile-rustflags`. Developed test-first.
 
 ```sh
-cargo test                      # unit tests
-cargo test -- --include-ignored # + live tests against the running compositor; the e2e tests
-                                #   briefly show the overlay, check it is not in the shot and
-                                #   that a drawing is saved
-cargo clippy --all-targets      # pedantic + nursery; also try --no-default-features --features x11
+cargo test --workspace                      # unit tests
+cargo test --workspace -- --include-ignored # + live tests against the running compositor; the
+                                            #   e2e tests show the overlay, record, and drive the
+                                            #   pointer (one at a time: they share the desktop)
+cargo clippy --workspace --all-targets      # pedantic + nursery; also with
+                                            #   --no-default-features --features x11,capture,editing,recording
+                                            #   and with each of capture, editing, recording left out
 ```
 
 ## License

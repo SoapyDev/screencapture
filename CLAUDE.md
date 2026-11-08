@@ -61,8 +61,10 @@ recording work).
 14. **TDD.** Write the failing test first, see it fail, then write the code.
     *Spirit:* every behaviour is pinned by a test that is known to catch its absence.
 
-15. **Run cargo's tools before every commit:** `cargo fmt`, `cargo clippy --all-targets` (also
-    with `--no-default-features --features x11`) and `cargo test`, all clean.
+15. **Run cargo's tools before every commit:** `cargo fmt --all`, `cargo clippy --workspace
+    --all-targets` (also with `--no-default-features --features x11,capture,editing,recording`,
+    and with each of `capture`, `editing`, `recording` left out) and `cargo test --workspace`,
+    all clean.
     *Spirit:* nothing is committed that the toolchain could have flagged, on any build.
 
 16. **Limit repetition within a slice.** When the same thing appears more than twice within one

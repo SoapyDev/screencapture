@@ -474,21 +474,12 @@ const fn audio_sources(audio: Audio) -> Option<&'static str> {
 pub fn gsr_args(job: &Job, out: &Path) -> Vec<String> {
     let Rect { x, y, w, h } = job.area;
     let frames = if job.variable { "vfr" } else { "cfr" };
-    let mut args: Vec<String> = vec![
-        "-w".into(),
-        format!("{w}x{h}+{x}+{y}"),
-        "-f".into(),
-        job.fps.to_string(),
-    ];
+    let mut args = vec!["-w".to_string(), format!("{w}x{h}+{x}+{y}")];
+    args.extend(["-f".to_string(), job.fps.to_string()]);
+    let (codec, quality) = (gsr_codec(job.codec), gsr_quality(job.quality));
     args.extend(strings([
-        "-fm",
-        frames,
-        "-k",
-        gsr_codec(job.codec),
-        "-q",
-        gsr_quality(job.quality),
+        "-fm", frames, "-k", codec, "-q", quality, "-c", "mp4", "-cursor", "yes",
     ]));
-    args.extend(strings(["-c", "mp4", "-cursor", "yes"]));
     // Written once the first frame is in: the signal that recording really started.
     args.extend(strings(["-write-first-frame-ts", "yes"]));
     if let Some((w, h)) = job.size {
