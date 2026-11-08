@@ -69,10 +69,10 @@ fn features() -> Vec<Box<dyn overlay::feature::Feature>> {
     vec![
         #[cfg(feature = "editing")]
         Box::new(screencapture_editing::overlay::Editing::new(config.section())),
-        #[cfg(all(feature = "recording", target_os = "linux"))]
-        Box::new(record::overlay::Recordings::new(config.section())),
         #[cfg(feature = "capture")]
         Box::new(screencapture_capture::overlay::Capturing::new(config.section())),
+        #[cfg(all(feature = "recording", target_os = "linux"))]
+        Box::new(record::overlay::Recordings::new(config.section())),
     ]
 }
 

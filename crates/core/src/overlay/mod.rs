@@ -636,7 +636,9 @@ impl Overlay {
             self.drawers.toggle_next(Instant::now());
             self.drawers_changed(cx);
         }
-        for index in 0..self.features.len() {
+        // Last feature first: a recording the test starts wins over a capture "clicked" while
+        // the bars slide away, whatever order the buttons are shown in.
+        for index in (0..self.features.len()).rev() {
             if let Some(effect) = self.features[index].test_hook(region) {
                 self.apply(index, effect, cx);
             }
