@@ -21,17 +21,13 @@ pub struct Part {
 ///
 /// # Errors
 ///
-/// When a part is too small to record once the frame has room.
+/// When `area` is too small to record on every screen once the frame has room.
 pub fn split(
     area: Rect,
     screens: &[&MonitorInfo],
     monitors: &[MonitorInfo],
 ) -> Result<(Vec<Part>, (i32, i32))> {
-    let pieces: Vec<Rect> = screens
-        .iter()
-        .filter_map(|screen| screen.rect.intersect(area))
-        .map(|piece| plan::room_for_border(piece, monitors))
-        .collect();
+    let pieces = pieces_on(area, screens, monitors);
     let areas = pieces
         .iter()
         .map(|&piece| plan::ensure_recordable(even_out(piece, &pieces)))
@@ -46,6 +42,23 @@ pub fn split(
         })
         .collect();
     Ok((parts, (xs.extent(), ys.extent())))
+}
+
+/// The pieces of `area` on `screens`, with room for the frame. A sliver too small to record
+/// (a region reaching a few px onto the next screen) is left out, unless every piece is one.
+fn pieces_on(area: Rect, screens: &[&MonitorInfo], monitors: &[MonitorInfo]) -> Vec<Rect> {
+    let pieces: Vec<Rect> = screens
+        .iter()
+        .filter_map(|screen| screen.rect.intersect(area))
+        .map(|piece| plan::room_for_border(piece, monitors))
+        .collect();
+    if !pieces.iter().copied().any(plan::is_recordable) {
+        return pieces;
+    }
+    pieces
+        .into_iter()
+        .filter(|&piece| plan::is_recordable(piece))
+        .collect()
 }
 
 /// `piece` cut to even sizes on the side that has no neighbour among `pieces`, so neighbouring
@@ -213,11 +226,32 @@ mod tests {
         assert_eq!((parts[0].area.right(), parts[1].area.x), (2560, 2560));
     }
 
+    /// 2 px on DP-1, the rest on HDMI-A-1.
+    fn a_region_a_sliver_into_dp_1() -> Rect {
+        Rect::new(2558, 300, 500, 500)
+    }
+
     #[test]
-    fn a_part_too_small_to_record_is_an_error() {
+    fn a_sliver_on_a_neighbouring_screen_is_left_out() {
         let m = three();
-        // 2 px on DP-1, the rest on HDMI-A-1.
-        let region = Rect::new(2558, 300, 500, 500);
+        let (parts, _) =
+            split(a_region_a_sliver_into_dp_1(), &[&m[0], &m[1]], &m).expect("the sliver is dropped");
+        assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn leaving_a_sliver_out_keeps_the_rest_of_the_region() {
+        let m = three();
+        let (parts, _) =
+            split(a_region_a_sliver_into_dp_1(), &[&m[0], &m[1]], &m).expect("the sliver is dropped");
+        assert_eq!(parts[0].area, Rect::new(2560, 300, 498, 500));
+    }
+
+    #[test]
+    fn a_region_too_small_on_every_screen_is_an_error() {
+        let m = three();
+        // 10 px on DP-1, 10 px on HDMI-A-1.
+        let region = Rect::new(2550, 300, 20, 500);
         assert!(split(region, &[&m[0], &m[1]], &m).is_err());
     }
 }

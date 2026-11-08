@@ -205,10 +205,16 @@ pub fn room_for_border(area: Rect, monitors: &[MonitorInfo]) -> Rect {
 ///
 /// When a side is shorter than the smallest recordable.
 pub fn ensure_recordable(rect: Rect) -> Result<Rect> {
-    if rect.w < MIN_SIDE || rect.h < MIN_SIDE {
+    if !is_recordable(rect) {
         bail!("the area is too small to record");
     }
     Ok(rect)
+}
+
+/// Whether both sides of `rect` reach the smallest recordable.
+#[must_use]
+pub const fn is_recordable(rect: Rect) -> bool {
+    rect.w >= MIN_SIDE && rect.h >= MIN_SIDE
 }
 
 /// When the refresh rate isn't known.
