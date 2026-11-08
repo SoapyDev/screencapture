@@ -19,6 +19,7 @@ use screencapture_core::{
         feature::{Act, Ctx, Effect, Feature, Point},
         handle_div, local, rect_div, report_unremembered, widgets,
     },
+    units::{ToF32, saturating_i32, unsigned},
 };
 
 use super::{
@@ -200,10 +201,10 @@ impl Editing {
         kept.insert(key, image.clone());
         let placed = img(ImageSource::Render(image))
             .absolute()
-            .left(px((room.x - monitor.rect.x) as f32))
-            .top(px((room.y - monitor.rect.y) as f32))
-            .w(px(room.w as f32))
-            .h(px(room.h as f32))
+            .left(px((room.x - monitor.rect.x).to_f32()))
+            .top(px((room.y - monitor.rect.y).to_f32()))
+            .w(px(room.w.to_f32()))
+            .h(px(room.h.to_f32()))
             .object_fit(ObjectFit::Fill);
         Some(placed.into_any_element())
     }
@@ -214,13 +215,13 @@ impl Editing {
             return Vec::new();
         };
         let outline = local(box_rect(shape), monitor);
-        let (x, y, h) = crate::text::caret(&shape.text, shape.width, outline.w.max(1) as u32);
+        let (x, y, height) = crate::text::caret(&shape.text, shape.width, unsigned(outline.w.max(1)));
         let caret = div()
             .absolute()
-            .left(px(outline.x as f32 + x))
-            .top(px(outline.y as f32 + y))
+            .left(px(outline.x.to_f32() + x))
+            .top(px(outline.y.to_f32() + y))
             .w(px(2.))
-            .h(px(h))
+            .h(px(height))
             .bg(widgets::color(shape.color));
         vec![
             rect_div(outline)
@@ -234,23 +235,23 @@ impl Editing {
     /// Debug builds: draw what the end-to-end tests ask for over `region`.
     #[cfg(debug_assertions)]
     fn draw_for_tests(&mut self, region: Rect) {
-        let (x, y, w, h) = (region.x as f32, region.y as f32, region.w as f32, region.h as f32);
+        let [left, top, width, height] = [region.x, region.y, region.w, region.h].map(ToF32::to_f32);
         let annotations = &mut self.annotations;
         // A line across the middle.
         if std::env::var_os("SCREENCAPTURE_E2E_LINE").is_some() {
             annotations.tool = Some(Tool::Line);
-            annotations.press((x, y + h / 2.));
-            annotations.release((x + w, y + h / 2.));
+            annotations.press((left, top + height / 2.));
+            annotations.release((left + width, top + height / 2.));
         }
         // The left quarter redacted, "Hi" on a filled box in the top-right quarter.
         if std::env::var_os("SCREENCAPTURE_E2E_EXTRAS").is_some() {
             annotations.tool = Some(Tool::Redact);
-            annotations.press((x, y));
-            annotations.release((x + w / 4., y + h));
+            annotations.press((left, top));
+            annotations.release((left + width / 4., top + height));
             annotations.tool = Some(Tool::Text);
             annotations.fill_on = true;
-            annotations.press((x + w / 2., y));
-            annotations.release((x + w, y + h / 2.));
+            annotations.press((left + width / 2., top));
+            annotations.release((left + width, top + height / 2.));
             annotations.type_text("Hi");
             annotations.stop_editing();
         }
@@ -370,11 +371,16 @@ impl Feature for Editing {
         else {
             return Vec::new();
         };
-        let to_local = |(x, y): Point| (x.round() as i32 - monitor.x, y.round() as i32 - monitor.y);
+        let to_local = |(x, y): Point| {
+            (
+                saturating_i32(x.round()) - monitor.x,
+                saturating_i32(y.round()) - monitor.y,
+            )
+        };
         let ring = (shape.tool == Tool::Counter).then(|| {
             let (x, y) = to_local(shape.points[0]);
-            let r = shape.radius().round() as i32 + 4;
-            let ring = rect_div(Rect::new(x - r, y - r, 2 * r, 2 * r)).rounded_full();
+            let radius = saturating_i32(shape.radius().round()) + 4;
+            let ring = rect_div(Rect::new(x - radius, y - radius, 2 * radius, 2 * radius)).rounded_full();
             ring.border_2().border_color(ACCENT).into_any_element()
         });
         let handles = shape.handles().into_iter().map(|handle| {
@@ -434,9 +440,9 @@ fn painted(shape: &Shape, origin: (i32, i32)) -> AnyElement {
 fn box_rect(shape: &Shape) -> Rect {
     let (left, top, right, bottom) = shape.bounds();
     Rect::new(
-        left.round() as i32,
-        top.round() as i32,
-        (right - left).round() as i32,
-        (bottom - top).round() as i32,
+        saturating_i32(left.round()),
+        saturating_i32(top.round()),
+        saturating_i32((right - left).round()),
+        saturating_i32((bottom - top).round()),
     )
 }

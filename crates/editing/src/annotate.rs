@@ -4,6 +4,7 @@
 //! Nothing here runs until the user first draws: an empty [`Annotations`] is a few words.
 
 use image::RgbaImage;
+use screencapture_core::units::{ToF32, saturating_u8, saturating_u32, saturating_usize};
 
 pub type Point = (f32, f32);
 
@@ -93,22 +94,22 @@ pub fn parse_color(text: &str) -> Option<Color> {
 
 /// Opaque colour from hue (degrees), saturation and value (0..=1), for the colour picker.
 #[must_use]
-pub fn hsv(h: f32, s: f32, v: f32) -> Color {
-    let channel = |n: f32| {
-        let k = (n + h / 60.) % 6.;
-        let c = (v * s).mul_add(-k.min(4. - k).clamp(0., 1.), v);
-        (c * 255.).round() as u8
+pub fn hsv(hue: f32, saturation: f32, value: f32) -> Color {
+    let channel = |offset: f32| {
+        let sector = (offset + hue / 60.) % 6.;
+        let level = (value * saturation).mul_add(-sector.min(4. - sector).clamp(0., 1.), value);
+        saturating_u8((level * 255.).round())
     };
     [channel(5.), channel(3.), channel(1.), 0xFF]
 }
 
 #[must_use]
-pub fn to_hex(c: Color) -> String {
-    let [r, g, b, a] = c;
-    if a == 0xFF {
-        format!("#{r:02X}{g:02X}{b:02X}")
+pub fn to_hex(color: Color) -> String {
+    let [red, green, blue, alpha] = color;
+    if alpha == 0xFF {
+        format!("#{red:02X}{green:02X}{blue:02X}")
     } else {
-        format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
+        format!("#{red:02X}{green:02X}{blue:02X}{alpha:02X}")
     }
 }
 
@@ -128,10 +129,17 @@ pub struct Shape {
     pub fill: Option<Color>,
 }
 
-/// The outline of the box with corners `a` and `b`.
-fn rectangle(a: Point, b: Point) -> Vec<Point> {
-    let (l, t, r, bottom) = (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1));
-    vec![(l, t), (r, t), (r, bottom), (l, bottom), (l, t)]
+/// The outline of the box with corners `corner` and `opposite`.
+fn rectangle(corner: Point, opposite: Point) -> Vec<Point> {
+    let (left, top) = (corner.0.min(opposite.0), corner.1.min(opposite.1));
+    let (right, bottom) = (corner.0.max(opposite.0), corner.1.max(opposite.1));
+    vec![
+        (left, top),
+        (right, top),
+        (right, bottom),
+        (left, bottom),
+        (left, top),
+    ]
 }
 
 /// A line from `a` to `b` with a head at `b` sized for `width`.
@@ -252,11 +260,11 @@ impl Shape {
             .fold(f32::MAX, f32::min)
     }
 
-    /// Distance from `p` to a text or redaction box (0 inside).
-    fn box_distance(&self, p: Point) -> f32 {
-        let (l, t, r, b) = self.bounds();
-        let across = (l - p.0).max(p.0 - r).max(0.);
-        let down = (t - p.1).max(p.1 - b).max(0.);
+    /// Distance from `point` to a text or redaction box (0 inside).
+    fn box_distance(&self, point: Point) -> f32 {
+        let (left, top, right, bottom) = self.bounds();
+        let across = (left - point.0).max(point.0 - right).max(0.);
+        let down = (top - point.1).max(point.1 - bottom).max(0.);
         across.hypot(down)
     }
 
@@ -268,8 +276,8 @@ impl Shape {
             Tool::Counter => Vec::new(),
             Tool::Line | Tool::Arrow => self.points.clone(),
             Tool::Rectangle | Tool::Ellipse | Tool::Freehand | Tool::Text | Tool::Redact => {
-                let (l, t, r, b) = self.bounds();
-                vec![(l, t), (r, t), (r, b), (l, b)]
+                let (left, top, right, bottom) = self.bounds();
+                vec![(left, top), (right, top), (right, bottom), (left, bottom)]
             }
         }
     }
@@ -439,13 +447,13 @@ fn number_strokes(number: u32, centre: Point, r: f32) -> (Vec<Vec<Point>>, f32) 
         .chars()
         .filter_map(|c| c.to_digit(10))
         .collect();
-    let n = digits.len() as f32;
-    let total = n.mul_add(DIGIT_ASPECT, (n - 1.) * DIGIT_GAP); // in heights
+    let count = digits.len().to_f32();
+    let total = count.mul_add(DIGIT_ASPECT, (count - 1.) * DIGIT_GAP); // in heights
     // As tall as looks right, but with the corners (plus the stroke) inside the disc.
     let height = (0.9 * r).min(0.86 * r / (total / 2.).hypot(0.5));
     let corner = (total.mul_add(-height / 2., centre.0), centre.1 - height / 2.);
     let placed = digits.iter().enumerate().flat_map(|(i, &d)| {
-        let left = (i as f32 * (DIGIT_ASPECT + DIGIT_GAP)).mul_add(height, corner.0);
+        let left = (i.to_f32() * (DIGIT_ASPECT + DIGIT_GAP)).mul_add(height, corner.0);
         placed_digit(d, (left, corner.1), height)
     });
     (placed.collect(), height * 0.2)
@@ -466,10 +474,10 @@ fn placed_digit(d: u32, corner: Point, height: f32) -> impl Iterator<Item = Vec<
 
 /// Closed ring through `n` points; about one segment per 4 px keeps it smooth.
 fn ellipse((cx, cy): Point, rx: f32, ry: f32) -> Vec<Point> {
-    let n = ((std::f32::consts::TAU * rx.max(ry) / 4.) as usize).clamp(32, 256);
+    let n = saturating_usize(std::f32::consts::TAU * rx.max(ry) / 4.).clamp(32, 256);
     let mut ring: Vec<Point> = (0..n)
         .map(|i| {
-            let t = std::f32::consts::TAU * i as f32 / n as f32;
+            let t = std::f32::consts::TAU * i.to_f32() / n.to_f32();
             (rx.mul_add(t.cos(), cx), ry.mul_add(t.sin(), cy))
         })
         .collect();
@@ -912,13 +920,15 @@ pub fn rasterize_clipped(image: &mut RgbaImage, shapes: &[Shape], origin: Point,
 
 /// A box shape's pixel rectangle `[x0, y0, x1, y1)`: every pixel it overlaps, within `clip`.
 fn box_pixels(shape: &Shape, origin: Point, scale: f32, clip: [u32; 4]) -> [u32; 4] {
-    let (l, t, r, b) = shape.bounds();
-    let at = |v: f32, o: f32, lo: u32, hi: u32| ((v - o) * scale).clamp(lo as f32, hi as f32);
+    let (left, top, right, bottom) = shape.bounds();
+    let at = |edge: f32, start: f32, low: u32, high: u32| {
+        ((edge - start) * scale).clamp(low.to_f32(), high.to_f32())
+    };
     [
-        at(l, origin.0, clip[0], clip[2]).floor() as u32,
-        at(t, origin.1, clip[1], clip[3]).floor() as u32,
-        at(r, origin.0, clip[0], clip[2]).ceil() as u32,
-        at(b, origin.1, clip[1], clip[3]).ceil() as u32,
+        saturating_u32(at(left, origin.0, clip[0], clip[2]).floor()),
+        saturating_u32(at(top, origin.1, clip[1], clip[3]).floor()),
+        saturating_u32(at(right, origin.0, clip[0], clip[2]).ceil()),
+        saturating_u32(at(bottom, origin.1, clip[1], clip[3]).ceil()),
     ]
 }
 
@@ -933,16 +943,25 @@ fn redact(image: &mut RgbaImage, shape: &Shape, origin: Point, scale: f32, clip:
 }
 
 fn burn_text(image: &mut RgbaImage, shape: &Shape, origin: Point, scale: f32, clip: [u32; 4]) {
-    let (l, t, r, b) = shape.bounds();
-    let (x0, y0) = (((l - origin.0) * scale).round(), ((t - origin.1) * scale).round());
-    let (w, h) = (((r - l) * scale).round() as u32, ((b - t) * scale).round() as u32);
-    let text = crate::text::render(&shape.text, shape.width * scale, shape.color, shape.fill, w, h);
-    for (dx, dy, p) in text.enumerate_pixels() {
-        let (x, y) = (x0 + dx as f32, y0 + dy as f32);
-        let inside = x >= clip[0] as f32 && y >= clip[1] as f32 && x < clip[2] as f32 && y < clip[3] as f32;
-        if inside && p[3] > 0 {
-            let dst = &mut image.get_pixel_mut(x as u32, y as u32).0;
-            *dst = blend(*dst, [p[0], p[1], p[2], 255], f32::from(p[3]) / 255.);
+    let (left, top, right, bottom) = shape.bounds();
+    let corner = (
+        ((left - origin.0) * scale).round(),
+        ((top - origin.1) * scale).round(),
+    );
+    let pixels = |extent: f32| saturating_u32((extent * scale).round());
+    let size = (pixels(right - left), pixels(bottom - top));
+    let text = crate::text::render(&shape.text, shape.width * scale, shape.color, shape.fill, size);
+    let [clip_left, clip_top, clip_right, clip_bottom] = clip.map(ToF32::to_f32);
+    for (dx, dy, pixel) in text.enumerate_pixels() {
+        let (x, y) = (corner.0 + dx.to_f32(), corner.1 + dy.to_f32());
+        let inside = x >= clip_left && y >= clip_top && x < clip_right && y < clip_bottom;
+        if inside && pixel[3] > 0 {
+            let dst = &mut image.get_pixel_mut(saturating_u32(x), saturating_u32(y)).0;
+            *dst = blend(
+                *dst,
+                [pixel[0], pixel[1], pixel[2], 255],
+                f32::from(pixel[3]) / 255.,
+            );
         }
     }
 }
@@ -953,7 +972,7 @@ fn pixel_box(points: impl Iterator<Item = Point>, pad: f32, clip: [u32; 4]) -> O
     for (x, y) in points {
         (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
     }
-    let at = |v: f32, min: u32, max: u32| v.clamp(min as f32, max as f32) as u32;
+    let at = |v: f32, min: u32, max: u32| saturating_u32(v.clamp(min.to_f32(), max.to_f32()));
     let b = [
         at((x0 - pad).floor(), clip[0], clip[2]),
         at((y0 - pad).floor(), clip[1], clip[3]),
@@ -1003,7 +1022,7 @@ impl Mask {
         for py in near[1].max(top)..near[3].min(bottom) {
             for px in near[0].max(left)..near[2].min(right) {
                 let kept = &mut self.coverage[(py - top) as usize * width + (px - left) as usize];
-                *kept = kept.max(covered(px as f32, py as f32));
+                *kept = kept.max(covered(px.to_f32(), py.to_f32()));
             }
         }
     }
@@ -1011,11 +1030,13 @@ impl Mask {
     /// Paint `color` into `image` as covered.
     fn blend_into(&self, image: &mut RgbaImage, color: Color) {
         let [left, top, right, _] = self.area;
-        let width = (right - left) as usize;
-        for (i, &coverage) in self.coverage.iter().enumerate().filter(|(_, c)| **c > 0.) {
-            let (px, py) = (left + (i % width) as u32, top + (i / width) as u32);
-            let pixel = &mut image.get_pixel_mut(px, py).0;
-            *pixel = blend(*pixel, color, coverage);
+        // An empty area has no coverage, so no row: `max(1)` only keeps `chunks` from panicking.
+        let width = ((right - left) as usize).max(1);
+        for (row, py) in self.coverage.chunks(width).zip(top..) {
+            for (&coverage, px) in row.iter().zip(left..).filter(|(c, _)| **c > 0.) {
+                let pixel = &mut image.get_pixel_mut(px, py).0;
+                *pixel = blend(*pixel, color, coverage);
+            }
         }
     }
 }
@@ -1051,12 +1072,12 @@ pub fn blend(dst: [u8; 4], src: Color, coverage: f32) -> [u8; 4] {
         return [0; 4];
     }
     let channel =
-        |s: u8, d: u8| (f32::from(s).mul_add(a, f32::from(d) * da * (1. - a)) / out_a).round() as u8;
+        |s: u8, d: u8| saturating_u8((f32::from(s).mul_add(a, f32::from(d) * da * (1. - a)) / out_a).round());
     [
         channel(src[0], dst[0]),
         channel(src[1], dst[1]),
         channel(src[2], dst[2]),
-        (out_a * 255.).round() as u8,
+        saturating_u8((out_a * 255.).round()),
     ]
 }
 
@@ -1605,13 +1626,13 @@ mod tests {
         assert!(Tool::Text.is_box() && !Tool::Rectangle.is_box());
         rasterize(&mut img, std::slice::from_ref(&c), (0., 0.), 1.);
         // Inside the disc near its rim: fill colour.
-        let r = c.radius() as u32;
+        let r = saturating_u32(c.radius());
         assert_eq!(img.get_pixel(20 - r + 2, 20).0, [0, 0, 255, 255]);
         // Some pixels of the number are white.
         let whites = (10..30)
             .flat_map(|y| (10..30).map(move |x| (x, y)))
             .filter(|&(x, y)| {
-                img.get_pixel(x, y).0 == [255; 4] && (x as f32 - 19.5).hypot(y as f32 - 19.5) < 8.
+                img.get_pixel(x, y).0 == [255; 4] && (x.to_f32() - 19.5).hypot(y.to_f32() - 19.5) < 8.
             })
             .count();
         assert!(whites > 3, "number drawn");

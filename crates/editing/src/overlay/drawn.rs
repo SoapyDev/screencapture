@@ -11,6 +11,7 @@ use image::RgbaImage;
 use screencapture_core::{
     capture::Rect,
     drawings::{Drawings, Shared},
+    units::{ToF32, saturating_i32},
 };
 
 use super::tools;
@@ -56,10 +57,10 @@ fn extent(shape: &Shape) -> Rect {
         shape.width.mul_add(4., 4.)
     };
     Rect::new(
-        (left - pad).floor() as i32,
-        (top - pad).floor() as i32,
-        2.0f32.mul_add(pad, right - left).ceil() as i32,
-        2.0f32.mul_add(pad, bottom - top).ceil() as i32,
+        saturating_i32((left - pad).floor()),
+        saturating_i32((top - pad).floor()),
+        saturating_i32(2.0f32.mul_add(pad, right - left).ceil()),
+        saturating_i32(2.0f32.mul_add(pad, bottom - top).ceil()),
     )
 }
 
@@ -84,10 +85,10 @@ impl DrawnView {
             .clone();
         let placed = img(ImageSource::Render(image))
             .absolute()
-            .left(px((room.x - self.area.x) as f32))
-            .top(px((room.y - self.area.y) as f32))
-            .w(px(room.w as f32))
-            .h(px(room.h as f32))
+            .left(px((room.x - self.area.x).to_f32()))
+            .top(px((room.y - self.area.y).to_f32()))
+            .w(px(room.w.to_f32()))
+            .h(px(room.h.to_f32()))
             .object_fit(ObjectFit::Fill);
         Some(placed.into_any_element())
     }

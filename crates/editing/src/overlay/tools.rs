@@ -14,6 +14,8 @@ use screencapture_core::overlay::{
     widgets::{button, color},
 };
 
+use screencapture_core::units::{ToF32, saturating_u32};
+
 use super::editing::Editing;
 use crate::annotate::{self, Color, Shape, Target, Tool};
 
@@ -24,21 +26,21 @@ pub struct TextKey {
     size: u32,
     color: Color,
     fill: Option<Color>,
-    w: u32,
-    h: u32,
+    /// The box in device pixels: width, height.
+    pixels: (u32, u32),
 }
 
 impl TextKey {
     /// For `shape` shown at `scale` device pixels per logical pixel.
     pub fn new(shape: &Shape, scale: f32) -> Self {
-        let (l, t, r, b) = shape.bounds();
+        let (left, top, right, bottom) = shape.bounds();
+        let device = |extent: f32| saturating_u32((extent * scale).round());
         Self {
             text: shape.text.clone(),
             size: (shape.width * scale).to_bits(),
             color: shape.color,
             fill: shape.fill,
-            w: ((r - l) * scale).round() as u32,
-            h: ((b - t) * scale).round() as u32,
+            pixels: (device(right - left), device(bottom - top)),
         }
     }
 
@@ -49,8 +51,7 @@ impl TextKey {
             f32::from_bits(self.size),
             self.color,
             self.fill,
-            self.w,
-            self.h,
+            self.pixels,
         );
         for px in image.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
@@ -212,15 +213,17 @@ pub fn picker(act: &Act, hue: f32, current: Color) -> Div {
 /// Every hue; a click shows its shades.
 fn hue_strip(act: &Act, hue: f32) -> Div {
     let cell = |i: usize| {
-        let h = i as f32 * 360. / HUES as f32;
+        let cell_hue = i.to_f32() * 360. / HUES.to_f32();
         div()
             .id(SharedString::from(format!("hue-{i}")))
             .w(px(9.))
             .h(px(18.))
             .cursor(CursorStyle::PointingHand)
-            .bg(color(annotate::hsv(h, 1., 1.)))
-            .when((h - hue).abs() < 1., |d| d.border_1().border_color(gpui::white()))
-            .on_click(edit(act, move |e| e.set_picker_hue(h)))
+            .bg(color(annotate::hsv(cell_hue, 1., 1.)))
+            .when((cell_hue - hue).abs() < 1., |d| {
+                d.border_1().border_color(gpui::white())
+            })
+            .on_click(edit(act, move |e| e.set_picker_hue(cell_hue)))
     };
     div().flex().children((0..HUES).map(cell))
 }
@@ -276,7 +279,7 @@ struct Place {
 
 impl Place {
     fn at(self, (x, y): annotate::Point) -> gpui::Point<Pixels> {
-        let (left, top) = (x - self.origin.0 as f32, y - self.origin.1 as f32);
+        let (left, top) = (x - self.origin.0.to_f32(), y - self.origin.1.to_f32());
         point(self.bounds.origin.x + px(left), self.bounds.origin.y + px(top))
     }
 }
