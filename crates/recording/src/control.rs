@@ -81,10 +81,9 @@ impl Recorder {
                 Outcome::AlreadyRecording(self.recording().map_or_else(Default::default, Path::to_path_buf))
             }
             (Command::Start(target, overrides) | Command::Toggle(target, overrides), _) => {
-                if running == Some(false) {
-                    let _ = self.stop().finished();
-                }
-                self.start(&target, overrides, env)
+                // What the recorder that quit by itself left is reported with the new start.
+                let ended = (running == Some(false)).then(|| self.stop().finished());
+                self.start(&target, overrides, env).after(ended.as_ref())
             }
         }
     }
@@ -197,6 +196,35 @@ impl Env for LiveEnv {
 }
 
 impl Outcome {
+    /// This outcome, also telling what came of the recording that `ended` by itself before it.
+    fn after(self, ended: Option<&Self>) -> Self {
+        let Some(note) = ended.and_then(Self::ended_note) else {
+            return self;
+        };
+        match self {
+            Self::Started { path, mut notes } => {
+                notes.insert(0, note);
+                Self::Started { path, notes }
+            }
+            Self::Failed(message) => Self::Failed(format!("{message}; {note}")),
+            other => other,
+        }
+    }
+
+    /// What to say about a recording that ended by itself, finished as this.
+    fn ended_note(&self) -> Option<String> {
+        match self {
+            Self::Saved(path) => Some(format!(
+                "the last recording stopped by itself; it is saved to {}",
+                path.display()
+            )),
+            Self::Failed(message) => Some(format!(
+                "the last recording stopped by itself and could not be saved: {message}"
+            )),
+            _ => None,
+        }
+    }
+
     /// The file finished, if it still needed it (slow for joined screens): never `Finishing`.
     #[must_use]
     pub fn finished(self) -> Self {
@@ -503,5 +531,39 @@ mod tests {
         );
         assert_eq!(r.recording(), None);
         assert_eq!(r.run(Command::Stop, &mut env), Outcome::NotRecording);
+    }
+
+    /// A recorder that records a little, then quits; and the file it left.
+    fn recorder_that_quit(env: &mut Fake) -> (Recorder, PathBuf) {
+        env.script = r#"out="$1"; echo data > "$out"; : > "$out.ts"; sleep 0.1"#;
+        let mut r = Recorder::default();
+        let Outcome::Started { path, .. } = r.run(start(), env) else {
+            panic!("the fake recorder starts")
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        env.script = super::super::recorder::FAKE_RECORDER;
+        (r, path)
+    }
+
+    #[test]
+    fn a_start_after_the_recorder_quit_says_where_the_last_file_is() {
+        let mut env = Fake::new();
+        let (mut r, old) = recorder_that_quit(&mut env);
+        let Outcome::Started { notes, .. } = r.run(start(), &mut env) else {
+            panic!("a new recording starts")
+        };
+        let old = old.display().to_string();
+        assert!(notes.iter().any(|note| note.contains(&old)), "{notes:?}");
+    }
+
+    #[test]
+    fn a_failed_start_after_the_recorder_quit_says_where_the_last_file_is() {
+        let mut env = Fake::new();
+        let (mut r, old) = recorder_that_quit(&mut env);
+        let bad = Command::Start(Target::Screens(vec!["DP-9".into()]), Overrides::default());
+        let Outcome::Failed(message) = r.run(bad, &mut env) else {
+            panic!("no screen DP-9")
+        };
+        assert!(message.contains(&old.display().to_string()), "{message}");
     }
 }
