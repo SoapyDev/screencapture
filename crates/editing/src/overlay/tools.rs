@@ -91,7 +91,7 @@ fn swatch(id: String, c: Color, selected: bool) -> Stateful<Div> {
     let theme = theme::current();
     div()
         .id(SharedString::from(id))
-        .size(px(20.))
+        .size(px(24.))
         .mx(px(2.))
         .rounded_full()
         .cursor(CursorStyle::PointingHand)

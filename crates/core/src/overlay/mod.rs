@@ -603,7 +603,7 @@ impl Overlay {
         resident: bool,
         features: Vec<Box<dyn Feature>>,
     ) -> Self {
-        let drawers = drawers::Drawers::new(features.len());
+        let drawers = drawers::Drawers::new(features.iter().map(|feature| feature.has_drawer()));
         let screens: Arc<[_]> = frozen.screens.into();
         let images = screens
             .iter()
@@ -632,6 +632,10 @@ impl Overlay {
     /// Debug builds: every feature acts on `region` as the end-to-end tests ask.
     #[cfg(debug_assertions)]
     fn test_hooks_on(&mut self, region: Rect, cx: &mut Context<Self>) {
+        if std::env::var_os("SCREENCAPTURE_E2E_DRAWER").is_some() {
+            self.drawers.toggle_next(Instant::now());
+            self.drawers_changed(cx);
+        }
         for index in 0..self.features.len() {
             if let Some(effect) = self.features[index].test_hook(region) {
                 self.apply(index, effect, cx);
@@ -914,6 +918,7 @@ impl Overlay {
     fn own_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         match keystroke.key.as_str() {
             "escape" => self.escape(cx),
+            "tab" => self.toggle_next_drawer(cx),
             "a" => self.select_all(cx),
             "r" => self.set_mode(Mode::Region, cx),
             "s" => self.set_mode(Mode::Screens, cx),
@@ -1015,6 +1020,12 @@ impl Overlay {
         cx: &mut Context<Self>,
     ) {
         self.drawers.hover(index, part, hovered, Instant::now());
+        self.drawers_changed(cx);
+    }
+
+    /// Tab: open the drawers one after the other, pinned.
+    fn toggle_next_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawers.toggle_next(Instant::now());
         self.drawers_changed(cx);
     }
 

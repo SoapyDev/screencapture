@@ -81,6 +81,10 @@ fn capture_label(ctx: &Ctx) -> (String, bool) {
 }
 
 impl Feature for Capturing {
+    fn has_drawer(&self) -> bool {
+        true
+    }
+
     fn key(&mut self, key: &Keystroke, ctx: &Ctx) -> Option<Effect> {
         match key.key.as_str() {
             "enter" => Some(self.save(ctx.selection.confirm())),
@@ -91,7 +95,8 @@ impl Feature for Capturing {
 
     fn actions(&self, act: &Act, ctx: &Ctx) -> Actions {
         let (label, ready) = capture_label(ctx);
-        let capture = widgets::button("capture", label, ready);
+        let summary = folder::shown(&self.screenshots.dir(None));
+        let capture = widgets::button_with_summary("capture", label, summary, ready);
         let capture = capture.on_click(act.on(|me: &mut Self, ctx| me.save(ctx.selection.confirm())));
         let folder = widgets::button("folder", self.folder_label(), false);
         let folder = folder.on_click(act.on(|me: &mut Self, _| me.browse()));

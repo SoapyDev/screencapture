@@ -26,6 +26,21 @@ pub fn button(id: impl Into<SharedString>, label: impl Into<SharedString>, activ
         .child(label.into())
 }
 
+/// A button with a smaller line under its label: what it will do, without opening its drawer.
+pub fn button_with_summary(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    summary: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    let summary = div().text_xs().opacity(0.7).child(summary.into());
+    button(id, label, active)
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(summary)
+}
+
 /// Click handler running `f` on the overlay.
 pub fn on(
     overlay: &Entity<Overlay>,

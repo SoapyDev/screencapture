@@ -14,14 +14,17 @@ pub enum Part {
 
 #[derive(Clone, Copy, Debug)]
 struct Slot {
+    /// Whether the feature has a drawer at all.
+    exists: bool,
     state: Drawer,
     over_button: bool,
     over_drawer: bool,
 }
 
 impl Slot {
-    const fn new() -> Self {
+    const fn new(exists: bool) -> Self {
         Self {
+            exists,
             state: Drawer::Closed,
             over_button: false,
             over_drawer: false,
@@ -41,9 +44,23 @@ pub struct Drawers {
 
 impl Drawers {
     #[must_use]
-    pub fn new(features: usize) -> Self {
+    pub fn new(has_drawer: impl IntoIterator<Item = bool>) -> Self {
         Self {
-            slots: vec![Slot::new(); features],
+            slots: has_drawer.into_iter().map(Slot::new).collect(),
+        }
+    }
+
+    /// The toggle key: opens the first drawer pinned; with one open, moves on to the next, and
+    /// past the last closes.
+    pub fn toggle_next(&mut self, now: Instant) {
+        let shown = (0..self.slots.len()).find(|index| self.state(*index).is_shown());
+        let from = shown.map_or(0, |index| index + 1);
+        let next = (from..self.slots.len()).find(|index| self.slots[*index].exists);
+        if let Some(index) = shown {
+            self.send(index, Event::ToggleKey, now);
+        }
+        if let Some(index) = next {
+            self.send(index, Event::ToggleKey, now);
         }
     }
 
@@ -136,7 +153,7 @@ mod tests {
     use crate::overlay::drawer::{DWELL, LINGER};
 
     fn opened(start: Instant) -> Drawers {
-        let mut drawers = Drawers::new(2);
+        let mut drawers = Drawers::new([true, true]);
         drawers.hover(0, Part::Button, true, start);
         drawers.tick(start + DWELL);
         drawers
@@ -208,6 +225,37 @@ mod tests {
     }
 
     #[test]
+    fn the_toggle_key_pins_the_first_drawer() {
+        let mut drawers = Drawers::new([false, true, true]);
+        drawers.toggle_next(Instant::now());
+        assert_eq!(drawers.state(1), Drawer::Pinned);
+    }
+
+    #[test]
+    fn the_toggle_key_moves_on_to_the_next_drawer() {
+        let mut drawers = Drawers::new([true, true]);
+        drawers.toggle_next(Instant::now());
+        drawers.toggle_next(Instant::now());
+        assert_eq!(drawers.state(1), Drawer::Pinned);
+    }
+
+    #[test]
+    fn the_toggle_key_past_the_last_drawer_closes_it() {
+        let mut drawers = Drawers::new([true, true]);
+        for _ in 0..3 {
+            drawers.toggle_next(Instant::now());
+        }
+        assert_eq!(drawers.state(1), Drawer::Closed);
+    }
+
+    #[test]
+    fn the_toggle_key_with_no_drawers_does_nothing() {
+        let mut drawers = Drawers::new([false]);
+        drawers.toggle_next(Instant::now());
+        assert_eq!(drawers.state(0), Drawer::Closed);
+    }
+
+    #[test]
     fn escape_closes_an_open_drawer() {
         let start = Instant::now();
         let mut drawers = opened(start);
@@ -216,18 +264,18 @@ mod tests {
 
     #[test]
     fn escape_with_no_drawer_open_does_nothing() {
-        assert!(!Drawers::new(2).escape(Instant::now()));
+        assert!(!Drawers::new([true, true]).escape(Instant::now()));
     }
 
     #[test]
     fn a_hover_on_a_feature_that_does_not_exist_is_ignored() {
-        let mut drawers = Drawers::new(1);
+        let mut drawers = Drawers::new([true]);
         drawers.hover(5, Part::Button, true, Instant::now());
         assert_eq!(drawers.state(5), Drawer::Closed);
     }
 
     #[test]
     fn nothing_waits_when_every_drawer_is_closed() {
-        assert_eq!(Drawers::new(2).next_tick(Instant::now()), None);
+        assert_eq!(Drawers::new([true, true]).next_tick(Instant::now()), None);
     }
 }

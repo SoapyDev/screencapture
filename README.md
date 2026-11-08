@@ -91,6 +91,7 @@ Selecting:
   clears it.
 - Screens mode (`S`): click screens to toggle them. `A` picks every screen.
 - `O` changes the screenshots' folder, `Shift+O` the videos'; `Esc` or right-click cancels.
+- The Capture and Record buttons each have a drawer on their left (the folder; the recording options): it opens when the pointer rests on the button, stays while the pointer is on it, and a click on an option pins it until a click outside or `Esc`. `Tab` opens the drawers one after the other.
 
 Drawing works for every kind of capture (region, one screen, several, all). Shapes are drawn
 over the frozen desktop and burnt into the saved PNG at its full resolution; with stitched

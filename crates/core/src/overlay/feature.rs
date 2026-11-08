@@ -141,6 +141,11 @@ pub trait Feature: Any {
         None
     }
 
+    /// Whether its action button has a drawer, which the toggle key (Tab) steps through.
+    fn has_drawer(&self) -> bool {
+        false
+    }
+
     /// Its buttons in the bottom action bar.
     fn actions(&self, _act: &Act, _ctx: &Ctx) -> Actions {
         Actions::default()
