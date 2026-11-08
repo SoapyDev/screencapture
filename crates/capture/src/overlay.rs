@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use gpui::{AnyElement, Keystroke, prelude::*};
 
 use screencapture_core::{
-    capture::Rect,
     overlay::{
         feature::{Act, Actions, Ctx, Effect, Feature, SaveJob},
         folder, report_unremembered, widgets,
@@ -112,7 +111,7 @@ impl Feature for Capturing {
     /// Save the region the test selected, unless it is recorded instead (or also clicked
     /// while the recording starts).
     #[cfg(debug_assertions)]
-    fn test_hook(&mut self, region: Rect) -> Option<Effect> {
+    fn test_hook(&mut self, region: screencapture_core::capture::Rect) -> Option<Effect> {
         let recorded = std::env::var_os("SCREENCAPTURE_E2E_RECORD").is_some();
         let clicked_too = std::env::var_os("SCREENCAPTURE_E2E_CAPTURE_TOO").is_some();
         (!recorded || clicked_too).then(|| self.save(Some(Request::Region(region))))

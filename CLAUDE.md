@@ -62,8 +62,9 @@ recording work).
     *Spirit:* every behaviour is pinned by a test that is known to catch its absence.
 
 15. **Run cargo's tools before every commit:** `cargo fmt --all`, `cargo clippy --workspace
-    --all-targets` (also with `--no-default-features --features x11,capture,editing,recording`,
-    and with each of `capture`, `editing`, `recording` left out) and `cargo test --workspace`,
+    --all-targets` (also with `--release`, where debug-only test hooks are compiled out, with
+    `--no-default-features --features x11,capture,editing,recording`, and with each of
+    `capture`, `editing`, `recording` left out) and `cargo test --workspace`,
     all clean. Clippy's `pedantic` and `nursery` groups are on for every crate, with no lint
     allowed workspace-wide: a real exception is an `#[expect(lint, reason = "…")]` on the one
     item it covers (number conversions go through core's `units`, which states each limit once).

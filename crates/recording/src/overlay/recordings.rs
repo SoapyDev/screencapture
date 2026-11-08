@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use gpui::{AnyElement, App, Div, Keystroke, SharedString, Stateful, prelude::*};
 
 use screencapture_core::{
-    capture::Rect,
     overlay::{
         feature::{Act, Actions, Ctx, Effect, Feature, HandOver},
         folder, mark_saved, report_unremembered, separator, widgets,
@@ -161,7 +160,7 @@ impl Feature for Recordings {
 
     /// Record the region the test selected.
     #[cfg(debug_assertions)]
-    fn test_hook(&mut self, region: Rect) -> Option<Effect> {
+    fn test_hook(&mut self, region: screencapture_core::capture::Rect) -> Option<Effect> {
         std::env::var_os("SCREENCAPTURE_E2E_RECORD")?;
         let command = Command::Start(Target::Region(region), Overrides::from(self.recording.record));
         Some(Effect::HandOver(Box::new(move |hand, cx| {
@@ -173,6 +172,7 @@ impl Feature for Recordings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use screencapture_core::capture::Rect;
 
     #[test]
     fn a_region_records_that_region() {
