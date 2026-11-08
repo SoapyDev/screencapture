@@ -358,33 +358,37 @@ impl<C: Deref<Target = [u8]>> Snapshot<C> {
     }
 
     fn stitch_pieces(&self, names: &[String]) -> Result<(Vec<Piece<'_, C>>, i32, i32)> {
-        let mut selected = Vec::new();
+        let selected = self.selected(names)?;
+        let xs = Compressor::new(selected.iter().map(|s| (s.rect.x, s.rect.right())));
+        let ys = Compressor::new(selected.iter().map(|s| (s.rect.y, s.rect.bottom())));
+        let pieces = selected.into_iter().map(|shot| Piece {
+            shot,
+            src: shot.rect,
+            dst: (xs.map(shot.rect.x), ys.map(shot.rect.y)),
+        });
+        let pieces = pieces.collect();
+        Ok((pieces, xs.extent(), ys.extent()))
+    }
+
+    /// The screens called `names`, each once, in that order: an unknown name, or none, is an
+    /// error.
+    fn selected(&self, names: &[String]) -> Result<Vec<&Shot<C>>> {
+        let mut selected: Vec<&Shot<C>> = Vec::new();
         for name in names {
-            match self.find(name) {
-                Some(shot) if !selected.iter().any(|s: &&Shot<C>| std::ptr::eq(*s, shot)) => {
-                    selected.push(shot);
-                }
-                Some(_) => {}
-                None => bail!(
+            let Some(shot) = self.find(name) else {
+                bail!(
                     "unknown monitor {name:?} (available: {})",
                     self.names().join(", ")
-                ),
+                );
+            };
+            if !selected.iter().any(|s| std::ptr::eq(*s, shot)) {
+                selected.push(shot);
             }
         }
         if selected.is_empty() {
             bail!("no monitor selected");
         }
-        let xs = Compressor::new(selected.iter().map(|s| (s.rect.x, s.rect.right())));
-        let ys = Compressor::new(selected.iter().map(|s| (s.rect.y, s.rect.bottom())));
-        let pieces: Vec<Piece<C>> = selected
-            .iter()
-            .map(|&shot| Piece {
-                shot,
-                src: shot.rect,
-                dst: (xs.map(shot.rect.x), ys.map(shot.rect.y)),
-            })
-            .collect();
-        Ok((pieces, xs.extent(), ys.extent()))
+        Ok(selected)
     }
 
     /// How [`Self::grab`] lays out the desktop for `request`, and its pixels per logical pixel.
@@ -475,23 +479,32 @@ fn render<C: Deref<Target = [u8]>>(pieces: &[Piece<C>], w: i32, h: i32) -> RgbaI
     let px = |v: i32| (f64::from(v) * scale).round() as u32;
     let mut canvas = RgbaImage::new(px(w), px(h));
     for piece in pieces {
-        let shot_scale = piece.shot.scale();
-        let sx = |v: i32| (f64::from(v) * shot_scale).round() as u32;
-        let src_x = sx(piece.src.x - piece.shot.rect.x);
-        let src_y = sx(piece.src.y - piece.shot.rect.y);
-        let src_w = sx(piece.src.w).min(piece.shot.image.width() - src_x);
-        let src_h = sx(piece.src.h).min(piece.shot.image.height() - src_y);
-        let view = imageops::crop_imm(&piece.shot.image, src_x, src_y, src_w, src_h);
-        let (dst_w, dst_h) = (px(piece.src.w), px(piece.src.h));
         let (dx, dy) = (i64::from(px(piece.dst.0)), i64::from(px(piece.dst.1)));
-        if (dst_w, dst_h) == (src_w, src_h) {
-            imageops::replace(&mut canvas, &*view, dx, dy);
+        let cut = piece.cut();
+        let (dst_w, dst_h) = (px(piece.src.w), px(piece.src.h));
+        if image::GenericImageView::dimensions(&*cut) == (dst_w, dst_h) {
+            imageops::replace(&mut canvas, &*cut, dx, dy);
         } else {
-            let scaled = imageops::resize(&*view, dst_w, dst_h, imageops::FilterType::Lanczos3);
+            let scaled = imageops::resize(&*cut, dst_w, dst_h, imageops::FilterType::Lanczos3);
             imageops::replace(&mut canvas, &scaled, dx, dy);
         }
     }
     canvas
+}
+
+impl<C: Deref<Target = [u8]>> Piece<'_, C> {
+    /// This piece of its screen's image, in that screen's pixels.
+    fn cut(&self) -> image::SubImage<&ImageBuffer<Rgba<u8>, C>> {
+        let scale = self.shot.scale();
+        let px = |v: i32| (f64::from(v) * scale).round() as u32;
+        let (x, y) = (
+            px(self.src.x - self.shot.rect.x),
+            px(self.src.y - self.shot.rect.y),
+        );
+        let w = px(self.src.w).min(self.shot.image.width() - x);
+        let h = px(self.src.h).min(self.shot.image.height() - y);
+        imageops::crop_imm(&self.shot.image, x, y, w, h)
+    }
 }
 
 #[cfg(test)]

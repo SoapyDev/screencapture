@@ -345,23 +345,10 @@ fn warm_up(cx: &mut App) {
         }
     }
     let one = size(px(1.), px(1.));
-    #[cfg(all(target_os = "linux", feature = "wayland"))]
-    let kind = {
-        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
-        WindowKind::LayerShell(LayerShellOptions {
-            namespace: "screencapture-warmup".into(),
-            layer: Layer::Background,
-            anchor: Anchor::TOP | Anchor::LEFT,
-            keyboard_interactivity: KeyboardInteractivity::None,
-            ..LayerShellOptions::default()
-        })
-    };
-    #[cfg(not(all(target_os = "linux", feature = "wayland")))]
-    let kind = WindowKind::PopUp;
     let options = WindowOptions {
         titlebar: None,
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(Point::default(), one))),
-        kind,
+        kind: warm_up_kind(),
         focus: false,
         window_background: WindowBackgroundAppearance::Transparent,
         ..WindowOptions::default()
@@ -372,44 +359,46 @@ fn warm_up(cx: &mut App) {
     trace("warmed up");
 }
 
-fn start(
-    mode: Mode,
-    frozen: Frozen,
-    #[cfg(unix)] client: Option<daemon::Client>,
-    #[cfg(not(unix))] _client: Option<()>,
-    resident: bool,
-    cx: &mut App,
-) {
-    let screens: Arc<[_]> = frozen.screens.into();
-    let images = screens
-        .iter()
-        .map(|(m, image)| (m.name.clone(), image.clone()))
-        .collect();
-    let selection = selection_at_pointer(mode, &screens);
+/// Out of sight: under everything, no keyboard.
+#[cfg(unix)]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "wayland")),
+    expect(clippy::missing_const_for_fn, reason = "the layer surface is not const")
+)]
+fn warm_up_kind() -> WindowKind {
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    {
+        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
+        WindowKind::LayerShell(LayerShellOptions {
+            namespace: "screencapture-warmup".into(),
+            layer: Layer::Background,
+            anchor: Anchor::TOP | Anchor::LEFT,
+            keyboard_interactivity: KeyboardInteractivity::None,
+            ..LayerShellOptions::default()
+        })
+    }
+    #[cfg(not(all(target_os = "linux", feature = "wayland")))]
+    WindowKind::PopUp
+}
+
+fn start(mode: Mode, frozen: Frozen, client: Waiting, resident: bool, cx: &mut App) {
     let features = (cx.global::<FeatureList>().0)();
     let overlay = cx.new(|cx: &mut Context<Overlay>| {
         // However the overlay goes away (the compositor may close every window, e.g. on an
         // output change), the client gets an answer and the daemon takes new requests.
         cx.on_release(Overlay::released).detach();
-        Overlay {
-            selection,
-            screens,
-            images,
-            phase: Phase::Selecting,
-            windows: Vec::new(),
-            #[cfg(unix)]
-            client,
-            resident,
-            features,
-            tools_ready: false,
-            traced: std::cell::Cell::new(false),
-            notice: None,
-        }
+        Overlay::new(mode, frozen, client, resident, features)
     });
     open_windows(&overlay, cx);
     #[cfg(debug_assertions)]
     run_test_hooks(&overlay, cx);
 }
+
+/// The daemon client waiting for the overlay's outcome (none standalone).
+#[cfg(unix)]
+type Waiting = Option<daemon::Client>;
+#[cfg(not(unix))]
+type Waiting = Option<()>;
 
 /// A selection over `screens`, told where the pointer already is.
 fn selection_at_pointer(mode: Mode, screens: &[(MonitorInfo, Arc<RenderImage>)]) -> Selection {
@@ -430,10 +419,8 @@ fn selection_at_pointer(mode: Mode, screens: &[(MonitorInfo, Arc<RenderImage>)])
 /// feature act on that region (draw, record, save) as the end-to-end tests ask.
 #[cfg(debug_assertions)]
 fn run_test_hooks(overlay: &Entity<Overlay>, cx: &App) {
-    let Some(region) = std::env::var("SCREENCAPTURE_E2E_SELECT")
-        .ok()
-        .and_then(|g| Rect::parse(&g).ok())
-    else {
+    let selected = std::env::var("SCREENCAPTURE_E2E_SELECT").ok();
+    let Some(region) = selected.and_then(|g| Rect::parse(&g).ok()) else {
         return;
     };
     let overlay = overlay.clone();
@@ -441,33 +428,13 @@ fn run_test_hooks(overlay: &Entity<Overlay>, cx: &App) {
         cx.background_executor()
             .timer(std::time::Duration::from_millis(500))
             .await;
-        overlay.update(cx, |o, cx| {
-            for index in 0..o.features.len() {
-                if let Some(effect) = o.features[index].test_hook(region) {
-                    o.apply(index, effect, cx);
-                }
-            }
-            cx.notify();
-        });
+        overlay.update(cx, |o, cx| o.test_hooks_on(region, cx));
     })
     .detach();
 }
 
 fn open_windows(overlay: &Entity<Overlay>, cx: &mut App) {
-    let monitors = overlay.read(cx).selection.monitors().to_vec();
-    let pointer = overlay.read(cx).selection.hovered().map(|m| m.name.clone());
-    let mut displays: Vec<_> = cx
-        .displays()
-        .into_iter()
-        .filter_map(|d| {
-            let o = d.bounds().origin;
-            let i = layout::match_display((f32::from(o.x) as i32, f32::from(o.y) as i32), &monitors)?;
-            Some((d, monitors[i].clone()))
-        })
-        .collect();
-    // The pointer's monitor first: it is where the user looks.
-    displays.sort_by_key(|(_, m)| Some(&m.name) != pointer.as_ref());
-    let mut displays = displays.into_iter();
+    let mut displays = displays_by_pointer(overlay.read(cx), cx).into_iter();
     // Open the first synchronously, the rest after yielding to the event loop, so the compositor
     // can configure and show the first surface without waiting for the others (~15 ms each).
     if let Some((display, monitor)) = displays.next() {
@@ -487,16 +454,23 @@ fn open_windows(overlay: &Entity<Overlay>, cx: &mut App) {
             cx.update(|cx| open_window(&overlay, &display, monitor, cx));
         }
         trace("overlay windows opened");
-        // Only once every display was tried: did any window open at all?
-        cx.update(|cx| {
-            overlay.update(cx, |o, cx| {
-                if o.selecting() && o.windows.is_empty() {
-                    o.end(&Err(anyhow::anyhow!("could not open any overlay window")), cx);
-                }
-            });
-        });
+        cx.update(|cx| overlay.update(cx, Overlay::end_without_windows));
     })
     .detach();
+}
+
+/// Each display with the screen it shows, the pointer's first: it is where the user looks.
+fn displays_by_pointer(o: &Overlay, cx: &App) -> Vec<(Rc<dyn PlatformDisplay>, MonitorInfo)> {
+    let monitors = o.selection.monitors();
+    let pointer = o.selection.hovered().map(|m| m.name.as_str());
+    let shown = |display: Rc<dyn PlatformDisplay>| {
+        let origin = display.bounds().origin;
+        let i = layout::match_display((f32::from(origin.x) as i32, f32::from(origin.y) as i32), monitors)?;
+        Some((display, monitors[i].clone()))
+    };
+    let mut displays: Vec<_> = cx.displays().into_iter().filter_map(shown).collect();
+    displays.sort_by_key(|(_, m)| Some(m.name.as_str()) != pointer);
+    displays
 }
 
 fn open_window(
@@ -505,9 +479,42 @@ fn open_window(
     monitor: MonitorInfo,
     cx: &mut App,
 ) {
-    let options = |kind, window_bounds| WindowOptions {
+    let build = |overlay: Entity<Overlay>, monitor: MonitorInfo| {
+        move |window: &mut Window, cx: &mut App| cx.new(|cx| View::new(overlay, monitor, window, cx))
+    };
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    let layer = {
+        let options = window_options(display, cover_everything(), windowed(monitor.rect));
+        cx.open_window(options, build(overlay.clone(), monitor.clone()))
+            .ok()
+    };
+    #[cfg(not(all(target_os = "linux", feature = "wayland")))]
+    let layer = None;
+    // X11, other platforms, or a Wayland compositor without layer-shell.
+    let handle = layer.or_else(|| {
+        let options = window_options(
+            display,
+            WindowKind::PopUp,
+            WindowBounds::Fullscreen(display.bounds()),
+        );
+        cx.open_window(options, build(overlay.clone(), monitor))
+            .inspect_err(|e| eprintln!("overlay window: {e:#}"))
+            .ok()
+    });
+    if let Some(handle) = handle {
+        overlay.update(cx, |o, _| o.windows.push(handle.into()));
+    }
+}
+
+/// An overlay window of `kind` on `display`.
+fn window_options(
+    display: &Rc<dyn PlatformDisplay>,
+    kind: WindowKind,
+    bounds: WindowBounds,
+) -> WindowOptions {
+    WindowOptions {
         titlebar: None,
-        window_bounds: Some(window_bounds),
+        window_bounds: Some(bounds),
         kind,
         focus: true,
         show: true,
@@ -517,43 +524,29 @@ fn open_window(
         window_background: WindowBackgroundAppearance::Opaque,
         app_id: Some("screencapture".into()),
         ..WindowOptions::default()
-    };
-    let build = |overlay: Entity<Overlay>, monitor: MonitorInfo| {
-        move |window: &mut Window, cx: &mut App| cx.new(|cx| View::new(overlay, monitor, window, cx))
-    };
-    #[cfg(all(target_os = "linux", feature = "wayland"))]
-    let mut handle = {
-        use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
-        let kind = WindowKind::LayerShell(LayerShellOptions {
-            namespace: "screencapture".into(),
-            layer: Layer::Overlay,
-            anchor: Anchor::all(),
-            // Cover panels too instead of being pushed aside by their exclusive zones.
-            exclusive_zone: Some(px(-1.)),
-            keyboard_interactivity: KeyboardInteractivity::Exclusive,
-            ..LayerShellOptions::default()
-        });
-        let size = size(px(monitor.rect.w as f32), px(monitor.rect.h as f32));
-        let bounds = WindowBounds::Windowed(Bounds::new(Point::default(), size));
-        cx.open_window(options(kind, bounds), build(overlay.clone(), monitor.clone()))
-            .ok()
-    };
-    #[cfg(not(all(target_os = "linux", feature = "wayland")))]
-    let mut handle = None;
-    // X11, other platforms, or a Wayland compositor without layer-shell.
-    if handle.is_none() {
-        let bounds = WindowBounds::Fullscreen(display.bounds());
-        match cx.open_window(
-            options(WindowKind::PopUp, bounds),
-            build(overlay.clone(), monitor),
-        ) {
-            Ok(h) => handle = Some(h),
-            Err(e) => eprintln!("overlay window: {e:#}"),
-        }
     }
-    if let Some(handle) = handle {
-        overlay.update(cx, |o, _| o.windows.push(handle.into()));
-    }
+}
+
+/// A window the size of `screen`.
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+fn windowed(screen: Rect) -> WindowBounds {
+    let size = size(px(screen.w as f32), px(screen.h as f32));
+    WindowBounds::Windowed(Bounds::new(Point::default(), size))
+}
+
+/// The top layer over the whole screen, with the keyboard: panels too are covered instead of
+/// pushing it aside with their exclusive zones.
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+fn cover_everything() -> WindowKind {
+    use gpui::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
+    WindowKind::LayerShell(LayerShellOptions {
+        namespace: "screencapture".into(),
+        layer: Layer::Overlay,
+        anchor: Anchor::all(),
+        exclusive_zone: Some(px(-1.)),
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        ..LayerShellOptions::default()
+    })
 }
 
 fn close_windows(overlay: &Entity<Overlay>, cx: &mut App) {
@@ -577,6 +570,47 @@ fn close_windows(overlay: &Entity<Overlay>, cx: &mut App) {
 }
 
 impl Overlay {
+    fn new(
+        mode: Mode,
+        frozen: Frozen,
+        client: Waiting,
+        resident: bool,
+        features: Vec<Box<dyn Feature>>,
+    ) -> Self {
+        let screens: Arc<[_]> = frozen.screens.into();
+        let images = screens
+            .iter()
+            .map(|(m, image)| (m.name.clone(), image.clone()))
+            .collect();
+        #[cfg(not(unix))]
+        let _ = client;
+        Self {
+            selection: selection_at_pointer(mode, &screens),
+            screens,
+            images,
+            phase: Phase::Selecting,
+            windows: Vec::new(),
+            #[cfg(unix)]
+            client,
+            resident,
+            features,
+            tools_ready: false,
+            traced: std::cell::Cell::new(false),
+            notice: None,
+        }
+    }
+
+    /// Debug builds: every feature acts on `region` as the end-to-end tests ask.
+    #[cfg(debug_assertions)]
+    fn test_hooks_on(&mut self, region: Rect, cx: &mut Context<Self>) {
+        for index in 0..self.features.len() {
+            if let Some(effect) = self.features[index].test_hook(region) {
+                self.apply(index, effect, cx);
+            }
+        }
+        cx.notify();
+    }
+
     const fn selecting(&self) -> bool {
         matches!(self.phase, Phase::Selecting)
     }
@@ -638,13 +672,7 @@ impl Overlay {
     /// Close the overlay and save what `job` makes of `request`, off the UI thread.
     fn save(&mut self, request: Request, job: SaveJob, cx: &mut Context<Self>) {
         // E.g. Capture clicked while the bars slide away for a recording.
-        if !self.selecting() {
-            return;
-        }
-        // A request that can't produce an image would lose the selection and drawings: keep
-        // the overlay up instead.
-        if let Err(e) = borrowed(&self.screens).and_then(|snapshot| snapshot.placements(&request)) {
-            eprintln!("screencapture: {e:#}");
+        if !self.selecting() || !self.can_make(&request) {
             cx.notify();
             return;
         }
@@ -662,6 +690,13 @@ impl Overlay {
             entity.update(cx, |o, cx| o.end(&saved.map(Some), cx));
         })
         .detach();
+    }
+
+    /// Whether `request` can produce an image: if not, the overlay stays up, keeping the
+    /// selection and drawings.
+    fn can_make(&self, request: &Request) -> bool {
+        let placed = borrowed(&self.screens).and_then(|snapshot| snapshot.placements(request));
+        placed.inspect_err(|e| eprintln!("screencapture: {e:#}")).is_ok()
     }
 
     /// Remove the windows once this update is over.
@@ -700,6 +735,13 @@ impl Overlay {
         GATE.leave(std::time::Instant::now());
         Self::close(cx);
         start(hand, cx);
+    }
+
+    /// Every display was tried: if no window opened at all, give up.
+    fn end_without_windows(&mut self, cx: &mut Context<Self>) {
+        if self.selecting() && self.windows.is_empty() {
+            self.end(&Err(anyhow::anyhow!("could not open any overlay window")), cx);
+        }
     }
 
     /// Report the outcome (`Ok(None)` = cancelled), close the overlay, and quit unless resident.

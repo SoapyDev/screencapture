@@ -83,24 +83,48 @@ fn to_bgra_banded(
     let row_bytes = width as usize * 4;
     let mut out = vec![0_u8; row_bytes * height as usize];
     let rows_per_band = (height as usize).div_ceil(bands.max(1)).max(1);
-    let convert = |band: usize, chunk: &mut [u8]| {
-        for (i, dst) in chunk.chunks_exact_mut(row_bytes).enumerate() {
-            let y = band * rows_per_band + i;
-            let src_y = if y_invert { height as usize - 1 - y } else { y };
-            let start = src_y * stride as usize;
-            convert_row(format, &data[start..start + row_bytes], dst);
-        }
+    let source = Source {
+        format,
+        data,
+        row_bytes,
+        height: height as usize,
+        stride: stride as usize,
+        y_invert,
     };
     if rows_per_band >= height as usize {
-        convert(0, &mut out);
+        source.convert(0, &mut out);
     } else {
         std::thread::scope(|scope| {
             for (band, chunk) in out.chunks_mut(rows_per_band * row_bytes).enumerate() {
-                scope.spawn(move || convert(band, chunk));
+                scope.spawn(move || source.convert(band * rows_per_band, chunk));
             }
         });
     }
     RgbaImage::from_raw(width, height, out).expect("buffer sized from dimensions")
+}
+
+/// The screen's pixels as the compositor gave them.
+#[derive(Clone, Copy)]
+struct Source<'a> {
+    format: PixelFormat,
+    data: &'a [u8],
+    row_bytes: usize,
+    height: usize,
+    stride: usize,
+    /// Rows come bottom first.
+    y_invert: bool,
+}
+
+impl Source<'_> {
+    /// Convert the rows from `first` on into `out`, as many as it holds.
+    fn convert(self, first: usize, out: &mut [u8]) {
+        for (i, dst) in out.chunks_exact_mut(self.row_bytes).enumerate() {
+            let y = first + i;
+            let src_y = if self.y_invert { self.height - 1 - y } else { y };
+            let start = src_y * self.stride;
+            convert_row(self.format, &self.data[start..start + self.row_bytes], dst);
+        }
+    }
 }
 
 fn convert_row(format: PixelFormat, src: &[u8], dst: &mut [u8]) {

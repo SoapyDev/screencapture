@@ -133,25 +133,7 @@ fn discover(
     state: &mut State,
 ) -> Result<Vec<wl_output::WlOutput>> {
     let qh = queue.handle();
-    let output_globals: Vec<(u32, u32)> = globals.contents().with_list(|list| {
-        list.iter()
-            .filter(|g| g.interface == "wl_output")
-            .map(|g| (g.name, g.version))
-            .collect()
-    });
-    let outputs: Vec<_> = output_globals
-        .iter()
-        .enumerate()
-        .map(|(i, &(name, version))| {
-            state.outputs.push(Output {
-                scale: 1,
-                ..Output::default()
-            });
-            globals
-                .registry()
-                .bind::<wl_output::WlOutput, _, _>(name, version.min(4), &qh, i)
-        })
-        .collect();
+    let outputs = bind_outputs(globals, state, &qh);
     if let Ok(xdg) = globals.bind::<ZxdgOutputManagerV1, _, _>(&qh, 1..=3, ()) {
         for (i, output) in outputs.iter().enumerate() {
             xdg.get_xdg_output(output, &qh, i);
@@ -162,6 +144,27 @@ fn discover(
         bail!("compositor advertises no outputs");
     }
     Ok(outputs)
+}
+
+/// Every output the compositor advertises, each with an [`Output`] in `state` to fill.
+fn bind_outputs(
+    globals: &GlobalList,
+    state: &mut State,
+    qh: &QueueHandle<State>,
+) -> Vec<wl_output::WlOutput> {
+    let advertised: Vec<(u32, u32)> = globals.contents().with_list(|list| {
+        let outputs = list.iter().filter(|g| g.interface == "wl_output");
+        outputs.map(|g| (g.name, g.version)).collect()
+    });
+    let bind = |(i, &(name, version)): (usize, &(u32, u32))| {
+        state.outputs.push(Output {
+            scale: 1,
+            ..Output::default()
+        });
+        let registry = globals.registry();
+        registry.bind::<wl_output::WlOutput, _, _>(name, version.min(4), qh, i)
+    };
+    advertised.iter().enumerate().map(bind).collect()
 }
 
 pub fn monitors() -> Result<Vec<MonitorInfo>> {
@@ -207,19 +210,26 @@ fn output_names(globals: &GlobalList) -> Vec<u32> {
     })
 }
 
+/// The screencopy manager and shared memory, which a capture can't do without.
+fn bind_screencopy(
+    globals: &GlobalList,
+    qh: &QueueHandle<State>,
+    state: &mut State,
+) -> Result<ZwlrScreencopyManagerV1> {
+    let manager = globals.bind::<ZwlrScreencopyManagerV1, _, _>(qh, 1..=3, ());
+    let manager = manager.context("compositor lacks zwlr_screencopy_manager_v1")?;
+    state.screencopy_version = manager.version();
+    let shm = globals
+        .bind::<wl_shm::WlShm, _, _>(qh, 1..=1, ())
+        .context("compositor lacks wl_shm")?;
+    state.shm = Some(shm);
+    Ok(manager)
+}
+
 impl Capturer {
     pub fn new() -> Result<Self> {
         let (conn, globals, mut queue, mut state) = connect()?;
-        let qh = queue.handle();
-        let manager = globals
-            .bind::<ZwlrScreencopyManagerV1, _, _>(&qh, 1..=3, ())
-            .context("compositor lacks zwlr_screencopy_manager_v1")?;
-        state.screencopy_version = manager.version();
-        state.shm = Some(
-            globals
-                .bind::<wl_shm::WlShm, _, _>(&qh, 1..=1, ())
-                .context("compositor lacks wl_shm")?,
-        );
+        let manager = bind_screencopy(&globals, &queue.handle(), &mut state)?;
         let outputs = discover(&globals, &mut queue, &mut state)?;
         state.pool = outputs.iter().map(|_| None).collect();
         let output_names = output_names(&globals);
@@ -259,8 +269,26 @@ impl Capturer {
     /// Copy the `wanted` monitors. Fails if outputs were added or removed since [`Self::new`]:
     /// make a new capturer then.
     pub fn capture(&mut self, wanted: &dyn Fn(&MonitorInfo) -> bool) -> Result<Vec<Shot>> {
-        let qh = self.queue.handle();
-        // Take in whatever changed meanwhile (modes, positions, hotplugs) without a round trip.
+        self.catch_up()?;
+        let infos: Vec<MonitorInfo> = self
+            .state
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, o)| o.info(i))
+            .collect();
+        self.ask_for_frames(&infos, wanted);
+        wait_for_frames(&mut self.queue, &mut self.state)?;
+        crate::trace("frames copied");
+        let frames = std::mem::take(&mut self.state.frames);
+        let transforms: Vec<Transform> = self.state.outputs.iter().map(|o| o.transform).collect();
+        let converted = convert_all(frames, &infos, &transforms);
+        self.keep_buffers(converted)
+    }
+
+    /// Take in whatever changed meanwhile (modes, positions, hotplugs) without a round trip;
+    /// screens plugged in or out are an error ([`OutputsChanged`]).
+    fn catch_up(&mut self) -> Result<()> {
         if let Some(guard) = self.queue.prepare_read() {
             let _ = guard.read();
         }
@@ -270,76 +298,26 @@ impl Capturer {
         if output_names(&self.globals) != self.output_names {
             return Err(OutputsChanged.into());
         }
+        Ok(())
+    }
 
-        let infos: Vec<MonitorInfo> = self
-            .state
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(i, o)| o.info(i))
-            .collect();
+    /// Ask the compositor to copy each `wanted` screen.
+    fn ask_for_frames(&mut self, infos: &[MonitorInfo], wanted: &dyn Fn(&MonitorInfo) -> bool) {
+        let qh = self.queue.handle();
         self.state.frames.clear();
-        for (i, info) in infos.iter().enumerate() {
-            if wanted(info) {
-                let index = self.state.frames.len();
-                let proxy = self.manager.capture_output(0, &self.outputs[i], &qh, index);
-                self.state.frames.push(Frame {
-                    output: i,
-                    proxy: Some(proxy),
-                    ..Frame::default()
-                });
-            }
+        for (i, _) in infos.iter().enumerate().filter(|(_, info)| wanted(info)) {
+            let index = self.state.frames.len();
+            let proxy = self.manager.capture_output(0, &self.outputs[i], &qh, index);
+            self.state.frames.push(Frame {
+                output: i,
+                proxy: Some(proxy),
+                ..Frame::default()
+            });
         }
-        wait_for_frames(&mut self.queue, &mut self.state)?;
-        crate::trace("frames copied");
-        let frames = std::mem::take(&mut self.state.frames);
+    }
 
-        let transforms: Vec<Transform> = self.state.outputs.iter().map(|o| o.transform).collect();
-        let converted: Vec<Converted> = std::thread::scope(|scope| {
-            // Collected so every conversion starts before the first join.
-            #[allow(clippy::needless_collect)]
-            let handles: Vec<_> = frames
-                .into_iter()
-                .map(|frame| {
-                    let info = infos[frame.output].clone();
-                    let transform = transforms[frame.output];
-                    scope.spawn(move || {
-                        if let Some(e) = frame.error {
-                            return (Err(e.context(format!("capturing {}", info.name))), None);
-                        }
-                        let Some(memory) = frame.memory else {
-                            return (
-                                Err(anyhow::anyhow!(
-                                    "capturing {}: frame finished without a buffer",
-                                    info.name
-                                )),
-                                None,
-                            );
-                        };
-                        let (spec, map, _) = &memory;
-                        let image = pixels::to_bgra(
-                            spec.format,
-                            map,
-                            spec.width,
-                            spec.height,
-                            spec.stride,
-                            frame.y_invert,
-                        );
-                        let shot = Shot {
-                            name: info.name,
-                            rect: info.rect,
-                            output_position: info.output_position,
-                            image: pixels::apply_transform(image, transform),
-                        };
-                        (Ok(shot), Some((frame.output, memory)))
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("conversion thread panicked"))
-                .collect()
-        });
+    /// Keep each frame's buffer for the next capture; the screens that were copied.
+    fn keep_buffers(&mut self, converted: Vec<Converted>) -> Result<Vec<Shot>> {
         let mut shots = Vec::with_capacity(converted.len());
         for (shot, memory) in converted {
             if let Some((output, memory)) = memory {
@@ -350,6 +328,51 @@ impl Capturer {
         self.reused = self.state.reused;
         usable(shots)
     }
+}
+
+/// Convert every frame at once, one thread each.
+fn convert_all(frames: Vec<Frame>, infos: &[MonitorInfo], transforms: &[Transform]) -> Vec<Converted> {
+    std::thread::scope(|scope| {
+        // Collected so every conversion starts before the first join.
+        let handles: Vec<_> = frames
+            .into_iter()
+            .map(|frame| {
+                let (info, transform) = (&infos[frame.output], transforms[frame.output]);
+                scope.spawn(move || convert(frame, info, transform))
+            })
+            .collect();
+        let joined = handles
+            .into_iter()
+            .map(|h| h.join().expect("conversion thread panicked"));
+        joined.collect()
+    })
+}
+
+/// One frame as a shot (or why not), with its buffer.
+fn convert(frame: Frame, info: &MonitorInfo, transform: Transform) -> Converted {
+    if let Some(e) = frame.error {
+        return (Err(e.context(format!("capturing {}", info.name))), None);
+    }
+    let Some(memory) = frame.memory else {
+        let error = anyhow::anyhow!("capturing {}: frame finished without a buffer", info.name);
+        return (Err(error), None);
+    };
+    let (spec, map, _) = &memory;
+    let image = pixels::to_bgra(
+        spec.format,
+        map,
+        spec.width,
+        spec.height,
+        spec.stride,
+        frame.y_invert,
+    );
+    let shot = Shot {
+        name: info.name.clone(),
+        rect: info.rect,
+        output_position: info.output_position,
+        image: pixels::apply_transform(image, transform),
+    };
+    (Ok(shot), Some((frame.output, memory)))
 }
 
 /// The screens that were copied. One that is off (DPMS) or refused must not cost the capture
@@ -392,13 +415,11 @@ fn give_up_at(started: std::time::Instant, first_done: Option<std::time::Instant
 /// Dispatch until every frame is done or failed, or until [`give_up_at`]; frames still pending
 /// then are failed (see [`usable`]).
 fn wait_for_frames(queue: &mut EventQueue<State>, state: &mut State) -> Result<()> {
-    use rustix::event::{PollFd, PollFlags, Timespec};
     let started = std::time::Instant::now();
     let mut first_done = None;
     loop {
         queue.dispatch_pending(state).context("Wayland dispatch")?;
-        let pending = |f: &Frame| matches!(f.state, FrameState::Negotiating | FrameState::Copying);
-        if !state.frames.iter().any(pending) {
+        if !state.frames.iter().any(Frame::pending) {
             return Ok(());
         }
         if first_done.is_none() && state.frames.iter().any(|f| matches!(f.state, FrameState::Ready)) {
@@ -406,43 +427,60 @@ fn wait_for_frames(queue: &mut EventQueue<State>, state: &mut State) -> Result<(
         }
         let left = give_up_at(started, first_done).saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            let waited = started.elapsed().as_secs_f32();
-            for f in state.frames.iter_mut().filter(|f| pending(f)) {
-                // Named by the caller's "capturing <name>" context.
-                f.error = Some(anyhow::anyhow!("not copied within {waited:.2} s (output off?)"));
-                f.state = FrameState::Failed;
-                if let Some(proxy) = f.proxy.take() {
-                    proxy.destroy();
-                }
-                // The compositor may still write into it: never reuse it.
-                if let Some((_, _, buffer)) = f.memory.take() {
-                    buffer.destroy();
-                }
-            }
+            give_up_on_pending(state, started.elapsed());
             return Ok(());
         }
-        queue.flush().context("Wayland flush")?;
-        let Some(guard) = queue.prepare_read() else {
-            continue;
-        };
-        let fd = guard.connection_fd();
-        let mut fds = [PollFd::new(&fd, PollFlags::IN)];
-        let wait = Timespec {
-            tv_sec: left.as_secs() as _,
-            tv_nsec: left.subsec_nanos().into(),
-        };
-        match rustix::event::poll(&mut fds, Some(&wait)) {
-            Ok(0) | Err(rustix::io::Errno::INTR) => continue,
-            Ok(_) => {}
-            Err(e) => return Err(e).context("waiting for the compositor"),
+        read_within(queue, left)?;
+    }
+}
+
+impl Frame {
+    /// Not finished yet, one way or the other.
+    const fn pending(&self) -> bool {
+        matches!(self.state, FrameState::Negotiating | FrameState::Copying)
+    }
+}
+
+/// The frames still pending after `waited` fail; their buffers are never reused (the
+/// compositor may still write into them).
+fn give_up_on_pending(state: &mut State, waited: std::time::Duration) {
+    let waited = waited.as_secs_f32();
+    for frame in state.frames.iter_mut().filter(|f| f.pending()) {
+        // Named by the caller's "capturing <name>" context.
+        frame.error = Some(anyhow::anyhow!("not copied within {waited:.2} s (output off?)"));
+        frame.state = FrameState::Failed;
+        if let Some(proxy) = frame.proxy.take() {
+            proxy.destroy();
         }
-        match guard.read() {
-            Err(wayland_client::backend::WaylandError::Io(e))
-                if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            result => {
-                result.context("reading from the compositor")?;
-            }
+        if let Some((_, _, buffer)) = frame.memory.take() {
+            buffer.destroy();
         }
+    }
+}
+
+/// Read what the compositor sent, waiting at most `left` for it.
+fn read_within(queue: &EventQueue<State>, left: std::time::Duration) -> Result<()> {
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    queue.flush().context("Wayland flush")?;
+    let Some(guard) = queue.prepare_read() else {
+        return Ok(());
+    };
+    let fd = guard.connection_fd();
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+    let wait = Timespec {
+        tv_sec: left.as_secs() as _,
+        tv_nsec: left.subsec_nanos().into(),
+    };
+    match rustix::event::poll(&mut fds, Some(&wait)) {
+        Ok(0) | Err(rustix::io::Errno::INTR) => return Ok(()),
+        Ok(_) => {}
+        Err(e) => return Err(e).context("waiting for the compositor"),
+    }
+    match guard.read() {
+        Err(wayland_client::backend::WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Ok(())
+        }
+        result => result.map(drop).context("reading from the compositor"),
     }
 }
 
@@ -464,37 +502,7 @@ fn shared_memory(size: usize) -> Result<(OwnedFd, Mmap)> {
 
 /// Allocate shared memory for the best offered format and ask the compositor to copy into it.
 fn start_copy(state: &mut State, index: usize, frame: &ZwlrScreencopyFrameV1, qh: &QueueHandle<State>) {
-    let result = (|| -> Result<Memory> {
-        let f = &mut state.frames[index];
-        let best = (0..f.offers.len())
-            .min_by_key(|&i| f.offers[i].format.preference())
-            .context("compositor offered no supported shm format")?;
-        let spec = f.offers.swap_remove(best);
-        // The last capture's buffer, if it still fits: its pages are already faulted in.
-        match state.pool.get_mut(f.output).and_then(Option::take) {
-            Some(memory) if memory.0 == spec => {
-                state.reused += 1;
-                return Ok(memory);
-            }
-            Some((_, _, unfit)) => unfit.destroy(),
-            None => {}
-        }
-        let size = spec.stride as usize * spec.height as usize;
-        let (fd, map) = shared_memory(size)?;
-        let shm = state.shm.as_ref().context("wl_shm not bound")?;
-        let pool: WlShmPool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
-        let buffer = pool.create_buffer(
-            0,
-            spec.width as i32,
-            spec.height as i32,
-            spec.stride as i32,
-            spec.wl_format,
-            qh,
-            (),
-        );
-        pool.destroy();
-        Ok((spec, map, buffer))
-    })();
+    let result = buffer_for(state, index, qh);
     let f = &mut state.frames[index];
     match result {
         Ok((spec, map, buffer)) => {
@@ -508,6 +516,38 @@ fn start_copy(state: &mut State, index: usize, frame: &ZwlrScreencopyFrameV1, qh
             frame.destroy();
         }
     }
+}
+
+/// A buffer for frame `index`, in the format it does best: the last capture's if it still
+/// fits (its pages are already faulted in), else a new one.
+fn buffer_for(state: &mut State, index: usize, qh: &QueueHandle<State>) -> Result<Memory> {
+    let frame = &mut state.frames[index];
+    let best = (0..frame.offers.len()).min_by_key(|&i| frame.offers[i].format.preference());
+    let spec = frame
+        .offers
+        .swap_remove(best.context("compositor offered no supported shm format")?);
+    let output = frame.output;
+    match state.pool.get_mut(output).and_then(Option::take) {
+        Some(memory) if memory.0 == spec => {
+            state.reused += 1;
+            return Ok(memory);
+        }
+        Some((_, _, unfit)) => unfit.destroy(),
+        None => {}
+    }
+    new_buffer(state, spec, qh)
+}
+
+/// A new shared-memory buffer for `spec`.
+fn new_buffer(state: &State, spec: BufferSpec, qh: &QueueHandle<State>) -> Result<Memory> {
+    let size = spec.stride as usize * spec.height as usize;
+    let (fd, map) = shared_memory(size)?;
+    let shm = state.shm.as_ref().context("wl_shm not bound")?;
+    let pool: WlShmPool = shm.create_pool(fd.as_fd(), size as i32, qh, ());
+    let (width, height, stride) = (spec.width as i32, spec.height as i32, spec.stride as i32);
+    let buffer = pool.create_buffer(0, width, height, stride, spec.wl_format, qh, ());
+    pool.destroy();
+    Ok((spec, map, buffer))
 }
 
 const fn pixel_format(format: wl_shm::Format) -> Option<PixelFormat> {

@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 
 use crate::selection::Mode;
@@ -251,38 +253,64 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50
 /// wait and says when it wants to run again (`None`: only after the next request).
 pub fn serve<E: Extension>(
     listener: &UnixListener,
-    idle: Option<std::time::Duration>,
+    idle: Option<Duration>,
     mut on_idle: impl FnMut(),
-    mut watch: impl FnMut() -> Option<std::time::Duration>,
+    mut watch: impl FnMut() -> Option<Duration>,
     mut handle: impl FnMut(Pending<E>),
 ) {
-    let mut idled = false;
-    let mut quiet_since = std::time::Instant::now();
+    let mut quiet = Quiet::after(idle);
     loop {
-        let check = watch();
-        let idle_left = idle
-            .filter(|_| !idled)
-            .map(|after| (quiet_since + after).saturating_duration_since(std::time::Instant::now()));
-        let wait = match (idle_left, check) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let wait = sooner(quiet.left(), watch());
         if let Some(wait) = wait
             && !readable_within(listener, wait)
         {
-            if let Some(after) = idle
-                && !idled
-                && quiet_since.elapsed() >= after
-            {
+            if quiet.just_became_idle() {
                 on_idle();
-                idled = true;
             }
             continue;
         }
         let Some(pending) = accept(listener) else { continue };
-        idled = false;
-        quiet_since = std::time::Instant::now();
+        quiet = Quiet::after(idle);
         handle(pending);
+    }
+}
+
+/// A quiet spell since the last request: idle once it lasted `after`, once per spell.
+struct Quiet {
+    after: Option<Duration>,
+    since: Instant,
+    idled: bool,
+}
+
+impl Quiet {
+    fn after(after: Option<Duration>) -> Self {
+        Self {
+            after,
+            since: Instant::now(),
+            idled: false,
+        }
+    }
+
+    /// How long until this spell counts as idle (`None`: never, or already did).
+    fn left(&self) -> Option<Duration> {
+        let after = self.after.filter(|_| !self.idled)?;
+        Some((self.since + after).saturating_duration_since(Instant::now()))
+    }
+
+    /// Whether the spell became idle just now (true once).
+    fn just_became_idle(&mut self) -> bool {
+        let due = self.after.is_some_and(|after| self.since.elapsed() >= after);
+        let first = due && !self.idled;
+        self.idled |= due;
+        first
+    }
+}
+
+/// The sooner of two waits, if any.
+fn sooner(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 

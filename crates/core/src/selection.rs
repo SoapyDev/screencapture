@@ -115,41 +115,51 @@ impl Selection {
     pub fn press(&mut self, x: i32, y: i32) {
         self.pointer = Some((x, y));
         match self.mode {
-            Mode::Region => {
-                self.drag = Some(match (self.hit(x, y), self.region) {
-                    (Hit::Handle(handle), Some(r)) => Drag::Resize {
-                        handle,
-                        press: (x, y),
-                        origin: r,
-                        current: r,
-                    },
-                    (Hit::Inside, Some(r)) => Drag::Move {
-                        grab: (x - r.x, y - r.y),
-                        current: r,
-                    },
-                    _ => Drag::New {
-                        start: (x, y),
-                        end: (x, y),
-                        had_region: self.region.is_some(),
-                    },
-                });
-            }
-            Mode::Screens => {
-                if let Some(name) = self.monitor_at(x, y).map(|m| m.name.clone()) {
-                    if let Some(i) = self.picked.iter().position(|n| *n == name) {
-                        self.picked.remove(i);
-                    } else {
-                        self.picked.push(name);
-                    }
-                }
-            }
+            Mode::Region => self.drag = Some(self.drag_from(x, y)),
+            Mode::Screens => self.toggle_screen_at(x, y),
         }
     }
 
+    /// What a press at (`x`, `y`) starts: resizing, moving, or a new region.
+    fn drag_from(&self, x: i32, y: i32) -> Drag {
+        match (self.hit(x, y), self.region) {
+            (Hit::Handle(handle), Some(r)) => Drag::Resize {
+                handle,
+                press: (x, y),
+                origin: r,
+                current: r,
+            },
+            (Hit::Inside, Some(r)) => Drag::Move {
+                grab: (x - r.x, y - r.y),
+                current: r,
+            },
+            _ => Drag::New {
+                start: (x, y),
+                end: (x, y),
+                had_region: self.region.is_some(),
+            },
+        }
+    }
+
+    /// Pick the screen at (`x`, `y`), or drop it if picked.
+    fn toggle_screen_at(&mut self, x: i32, y: i32) {
+        let Some(name) = self.monitor_at(x, y).map(|m| m.name.clone()) else {
+            return;
+        };
+        match self.picked.iter().position(|n| *n == name) {
+            Some(i) => drop(self.picked.remove(i)),
+            None => self.picked.push(name),
+        }
+    }
     pub fn motion(&mut self, x: i32, y: i32) {
         self.pointer = Some((x, y));
         let Some(drag) = self.drag else { return };
-        self.drag = Some(match drag {
+        self.drag = Some(self.dragged(drag, x, y));
+    }
+
+    /// `drag` with the pointer at (`x`, `y`).
+    fn dragged(&self, drag: Drag, x: i32, y: i32) -> Drag {
+        match drag {
             Drag::New {
                 start, had_region, ..
             } => Drag::New {
@@ -172,9 +182,8 @@ impl Selection {
                 origin,
                 current: self.resized(origin, handle, (x - press.0, y - press.1)),
             },
-        });
+        }
     }
-
     /// Ends a drag. Nothing is captured until [`Self::confirm`]: a plain click on a screen
     /// (with no region yet) selects that whole screen as the region.
     pub fn release(&mut self, x: i32, y: i32) {
@@ -185,19 +194,21 @@ impl Selection {
                 start,
                 end,
                 had_region,
-            } => {
-                let click = (end.0 - start.0).abs() < CLICK_SLOP && (end.1 - start.1).abs() < CLICK_SLOP;
-                match (click, had_region) {
-                    (false, _) => self.clamp(Rect::from_corners(start, end)),
-                    // A click clears the region; with none, it picks the screen under it.
-                    (true, true) => None,
-                    (true, false) => self.monitor_at(start.0, start.1).map(|m| m.rect),
-                }
-            }
+            } => self.drawn(start, end, had_region),
             Drag::Move { current, .. } | Drag::Resize { current, .. } => Some(current),
         };
     }
 
+    /// The region a drag from `start` to `end` leaves. A click clears the region; with none
+    /// (`had_region` false), it picks the screen under it.
+    fn drawn(&self, start: (i32, i32), end: (i32, i32), had_region: bool) -> Option<Rect> {
+        let click = (end.0 - start.0).abs() < CLICK_SLOP && (end.1 - start.1).abs() < CLICK_SLOP;
+        match (click, had_region) {
+            (false, _) => self.clamp(Rect::from_corners(start, end)),
+            (true, true) => None,
+            (true, false) => self.monitor_at(start.0, start.1).map(|m| m.rect),
+        }
+    }
     /// Every screen picked (what "All screens" does).
     #[must_use]
     pub fn is_all(&self) -> bool {
@@ -250,35 +261,17 @@ impl Selection {
     #[must_use]
     pub fn hit(&self, x: i32, y: i32) -> Hit {
         let Some(r) = self.region else { return Hit::Outside };
-        let s = HANDLE_SLOP;
-        let in_span = |v: i32, lo: i32, hi: i32| v >= lo - s && v <= hi + s;
+        let in_span = |v: i32, lo: i32, hi: i32| v >= lo - HANDLE_SLOP && v <= hi + HANDLE_SLOP;
         if !(in_span(x, r.x, r.right()) && in_span(y, r.y, r.bottom())) {
             return Hit::Outside;
         }
-        // The closer edge wins when the region is narrower than two slops.
-        let near = |v: i32, lo: i32, hi: i32| {
-            let (dl, dh) = ((v - lo).abs(), (v - hi).abs());
-            if dl <= s && dl <= dh {
-                -1
-            } else {
-                i32::from(dh <= s)
-            }
-        };
-        let handle = match (near(x, r.x, r.right()), near(y, r.y, r.bottom())) {
-            (-1, -1) => Handle::NW,
-            (1, -1) => Handle::NE,
-            (-1, 1) => Handle::SW,
-            (1, 1) => Handle::SE,
-            (-1, 0) => Handle::W,
-            (1, 0) => Handle::E,
-            (0, -1) => Handle::N,
-            (0, 1) => Handle::S,
-            _ if r.contains(x, y) => return Hit::Inside,
-            _ => return Hit::Outside,
-        };
-        Hit::Handle(handle)
+        let sides = (Side::of(x, r.x, r.right()), Side::of(y, r.y, r.bottom()));
+        match handle_at(sides) {
+            Some(handle) => Hit::Handle(handle),
+            None if r.contains(x, y) => Hit::Inside,
+            None => Hit::Outside,
+        }
     }
-
     /// Move the region by whole pixels (arrow keys), staying on the desktop.
     pub fn nudge(&mut self, dx: i32, dy: i32) {
         if let Some(r) = self.region {
@@ -358,6 +351,44 @@ impl Selection {
         r.w = r.w.max(1);
         r.h = r.h.max(1);
         self.clamp(r).unwrap_or(origin)
+    }
+}
+
+/// Where a coordinate is along one side of the region: near its start or end edge, or between.
+#[derive(Clone, Copy)]
+enum Side {
+    Start,
+    Between,
+    End,
+}
+
+impl Side {
+    /// Where `v` is between edges `lo` and `hi`; the closer edge wins when they are less than
+    /// two slops apart.
+    const fn of(v: i32, lo: i32, hi: i32) -> Self {
+        let (to_lo, to_hi) = ((v - lo).abs(), (v - hi).abs());
+        if to_lo <= HANDLE_SLOP && to_lo <= to_hi {
+            Self::Start
+        } else if to_hi <= HANDLE_SLOP {
+            Self::End
+        } else {
+            Self::Between
+        }
+    }
+}
+
+/// The handle at these sides (across, down), if any.
+const fn handle_at(sides: (Side, Side)) -> Option<Handle> {
+    match sides {
+        (Side::Start, Side::Start) => Some(Handle::NW),
+        (Side::End, Side::Start) => Some(Handle::NE),
+        (Side::Start, Side::End) => Some(Handle::SW),
+        (Side::End, Side::End) => Some(Handle::SE),
+        (Side::Start, Side::Between) => Some(Handle::W),
+        (Side::End, Side::Between) => Some(Handle::E),
+        (Side::Between, Side::Start) => Some(Handle::N),
+        (Side::Between, Side::End) => Some(Handle::S),
+        (Side::Between, Side::Between) => None,
     }
 }
 
