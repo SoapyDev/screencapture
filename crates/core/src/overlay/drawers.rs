@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::drawer::{Drawer, Event};
+use super::drawer::{Drawer, Event, KEEP_ALIVE, LINGER};
 
 /// Which part of a feature's button the pointer is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +17,8 @@ struct Slot {
     /// Whether the feature has a drawer at all.
     exists: bool,
     state: Drawer,
+    /// When the drawer last opened by itself: it stays at least [`KEEP_ALIVE`] from then.
+    opened: Option<Instant>,
     over_button: bool,
     over_drawer: bool,
 }
@@ -26,6 +28,7 @@ impl Slot {
         Self {
             exists,
             state: Drawer::Closed,
+            opened: None,
             over_button: false,
             over_drawer: false,
         }
@@ -33,6 +36,26 @@ impl Slot {
 
     const fn over(&self) -> bool {
         self.over_button || self.over_drawer
+    }
+
+    /// Remember when the drawer went from waiting to open.
+    fn note_opening(&mut self, before: Drawer, now: Instant) {
+        if matches!(before, Drawer::Opening { .. }) && self.state == Drawer::Open {
+            self.opened = Some(now);
+        }
+    }
+
+    /// Leaving soon after opening: the drawer closes no sooner than [`KEEP_ALIVE`] after it
+    /// opened.
+    fn keep_alive_on_leaving(&mut self, event: Event) {
+        let (Event::PointerLeft, Drawer::Closing { since }, Some(opened)) = (event, self.state, self.opened)
+        else {
+            return;
+        };
+        let earliest = opened + KEEP_ALIVE.saturating_sub(LINGER);
+        self.state = Drawer::Closing {
+            since: since.max(earliest),
+        };
     }
 }
 
@@ -147,7 +170,10 @@ impl Drawers {
         let Some(slot) = self.slots.get_mut(index) else {
             return;
         };
-        slot.state = slot.state.after(event, now);
+        let before = slot.state;
+        slot.state = before.after(event, now);
+        slot.note_opening(before, now);
+        slot.keep_alive_on_leaving(event);
         if matches!(slot.state, Drawer::Open | Drawer::Pinned) {
             self.close_the_others(index);
         }
@@ -199,7 +225,26 @@ mod tests {
         let start = Instant::now();
         let mut drawers = opened(start);
         drawers.hover(0, Part::Button, false, start + DWELL);
-        drawers.tick(start + DWELL + LINGER);
+        drawers.tick(start + DWELL + KEEP_ALIVE);
+        assert_eq!(drawers.state(0), Drawer::Closed);
+    }
+
+    #[test]
+    fn leaving_right_after_opening_does_not_close_it_within_the_keep_alive() {
+        let start = Instant::now();
+        let mut drawers = opened(start);
+        drawers.hover(0, Part::Button, false, start + DWELL);
+        drawers.tick(start + DWELL + KEEP_ALIVE / 2);
+        assert!(drawers.state(0).is_shown());
+    }
+
+    #[test]
+    fn leaving_long_after_opening_closes_after_the_linger_only() {
+        let start = Instant::now();
+        let mut drawers = opened(start);
+        let later = start + DWELL + KEEP_ALIVE * 3;
+        drawers.hover(0, Part::Button, false, later);
+        drawers.tick(later + LINGER);
         assert_eq!(drawers.state(0), Drawer::Closed);
     }
 

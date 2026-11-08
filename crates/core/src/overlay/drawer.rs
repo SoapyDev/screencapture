@@ -10,6 +10,9 @@ use crate::capture::Rect;
 
 /// Pointer rest on the button before the drawer opens: passing over doesn't open it.
 pub const DWELL: Duration = Duration::from_millis(120);
+/// The least time a drawer stays open once it has opened, whatever the pointer does: time to
+/// get onto it.
+pub const KEEP_ALIVE: Duration = Duration::from_millis(1200);
 /// Time away from the button and the drawer before it closes.
 pub const LINGER: Duration = Duration::from_millis(300);
 /// Space between the button and its options bar.

@@ -56,7 +56,6 @@ pub fn round_button(
     let hint = hint.into();
     div()
         .id(id.into())
-        .occlude()
         .size(px(ROUND))
         .rounded_full()
         .flex()
